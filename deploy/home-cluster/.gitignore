@@ -1,0 +1,2 @@
+# Real configuration: secrets, hostnames. Only .env.example is tracked.
+.env
