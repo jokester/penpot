@@ -102,6 +102,53 @@ Each is measured, not assumed; the probe is in `spikes/`.
    reset to the `2.17.0` tag, the newest published MCP. The mismatch only affects
    `ApiDocs` drift, not compatibility, because the plugin ships from cloud.
 
+## 4b. Findings added 2026-09-18 (self-hosted instance)
+
+A local Penpot removes most of section 4 rather than adding to it. Measured on
+the official 2.17 images (`docker/images/docker-compose.yaml`, which already
+ships a `penpot-mcp` service and the `enable-mcp` flag):
+
+8. **Nothing needs injecting.** nginx proxies the MCP server at the app's own
+   origin (`/mcp/ws`, `/mcp/stream`), which is exactly where
+   `app.config/mcp-ws-uri` already resolves. Finding 1 is moot locally.
+
+9. **No private-network block and no Cloudflare.** Page and socket are both
+   loopback, so findings 2 and 5 do not apply — and Playwright's bundled
+   Chromium works, so Google Chrome need not be installed at all.
+
+10. **A workspace URL needs `team-id`, not just `file-id`.** Without it the page
+    loads, authenticates, opens the notifications socket and reports no error,
+    but `team-container*` (`frontend/src/app/main/ui.cljs:187`) renders nothing,
+    so the plugin never starts. A fourth lying readiness signal, and the most
+    convincing one yet: the console is clean.
+
+11. **Onboarding blocks a fresh account.** `manage.py create-profile` leaves the
+    questionnaire pending, and it renders *instead of* the app. Clear it with
+    the `onboardingViewed` profile prop — and set `releaseNotesViewed` to the
+    release (`"2.17"`), not the build (`"2.17.2"`), or the what's-new modal
+    takes its place.
+
+12. **The MCP server and the MCP plugin are one version-matched pair.** The
+    plugin ships inside the *frontend*, so mounting a develop-built server into
+    a 2.17 stack breaks it: develop added a plugin heartbeat that 2.17 never
+    sends, and the server then rejects every tool call with "the Penpot plugin
+    tab appears to be suspended … click the tab to wake it". Nothing is
+    suspended and there is no tab to click. Mount both builds, or neither.
+
+13. **The browser profile caches the plugin, and hides a fixed bug.** After
+    mounting a matching plugin build, the stale cached copy kept loading and
+    kept producing finding 12's error, which sent the investigation back to
+    throttling and tab visibility (both measured, both innocent: timers tick 12
+    times in 12 seconds in every frame, plugin iframe included). `config.js`
+    now clears the profile's cache directories at launch for a loopback origin.
+
+14. **Cookie auth stays required, but stops hurting.** Finding 3 holds, yet a
+    local password account makes the login non-interactive
+    (`PENPOT_EMAIL`/`PENPOT_PASSWORD`), which retires next step 4 for local use.
+
+A working instance lives in `~/penpot-local` on the original machine; its
+README carries the day-to-day commands and the mount recipe.
+
 ## 5. Setting up the new machine
 
 Prerequisites: Node 22+, pnpm, and **Google Chrome installed** (the host uses
