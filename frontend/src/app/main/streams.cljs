@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.streams
   "User interaction events and streams."
@@ -31,6 +31,17 @@
 
 (defonce workspace-selrect
   (rx/behavior-subject nil))
+
+(defn clear-transform-preview!
+  "Reset the interactive-transform preview behaviour-subjects. Controls
+  that drive a live preview (drag/resize/rotate, flex spacing handles,
+  grid track/cell gestures) set these via `set-wasm-modifiers` and clear
+  them at gesture end. If the control unmounts mid-gesture that clearing
+  never runs, so the stale selrect keeps displacing the DOM selection
+  overlay of the next selection. Call from gesture end / unmount cleanup."
+  []
+  (rx/push! wasm-modifiers nil)
+  (rx/push! workspace-selrect nil))
 
 ;; --- Derived streams
 

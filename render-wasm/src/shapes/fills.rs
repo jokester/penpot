@@ -42,6 +42,29 @@ impl Gradient {
         self.offsets.extend(offsets);
     }
 
+    pub fn start(&self) -> (f32, f32) {
+        self.start
+    }
+
+    pub fn end(&self) -> (f32, f32) {
+        self.end
+    }
+
+    pub fn opacity(&self) -> u8 {
+        self.opacity
+    }
+
+    pub fn width(&self) -> f32 {
+        self.width
+    }
+
+    pub fn stops(&self) -> impl Iterator<Item = (Color, f32)> + '_ {
+        self.colors
+            .iter()
+            .copied()
+            .zip(self.offsets.iter().copied())
+    }
+
     pub fn to_linear_shader(&self, rect: &Rect) -> Option<skia::Shader> {
         let start = (
             rect.left + self.start.0 * rect.width(),
@@ -95,6 +118,14 @@ impl Gradient {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Copy)]
+pub struct ImageFillTransform {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImageFill {
     id: Uuid,
@@ -102,6 +133,7 @@ pub struct ImageFill {
     width: i32,
     height: i32,
     keep_aspect_ratio: bool,
+    transform: Option<ImageFillTransform>,
 }
 
 impl ImageFill {
@@ -112,6 +144,25 @@ impl ImageFill {
             width,
             height,
             keep_aspect_ratio,
+            transform: None,
+        }
+    }
+
+    pub fn new_with_transform(
+        id: Uuid,
+        opacity: u8,
+        width: i32,
+        height: i32,
+        keep_aspect_ratio: bool,
+        transform: Option<ImageFillTransform>,
+    ) -> Self {
+        Self {
+            id,
+            opacity,
+            width,
+            height,
+            keep_aspect_ratio,
+            transform,
         }
     }
 
@@ -125,6 +176,18 @@ impl ImageFill {
 
     pub fn keep_aspect_ratio(&self) -> bool {
         self.keep_aspect_ratio
+    }
+
+    pub fn width(&self) -> i32 {
+        self.width
+    }
+
+    pub fn height(&self) -> i32 {
+        self.height
+    }
+
+    pub fn transform(&self) -> Option<&ImageFillTransform> {
+        self.transform.as_ref()
     }
 }
 

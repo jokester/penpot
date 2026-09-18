@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.settings.profile
   (:require-macros [app.main.style :as stl])
@@ -143,8 +143,9 @@
   (mf/with-effect []
     (dom/set-html-title (tr "title.settings.profile")))
 
-  [:div {:class (stl/css :dashboard-settings)}
+  [:section {:class (stl/css :dashboard-settings)
+             :aria-labelledby "profile-section-title"}
    [:div {:class (stl/css :form-container)}
-    [:h2 (tr "labels.profile")]
+    [:h2 {:id "profile-section-title"} (tr "labels.profile")]
     [:> profile-photo-form*]
     [:> profile-form*]]])

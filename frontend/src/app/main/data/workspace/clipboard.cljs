@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.data.workspace.clipboard
   (:require
@@ -34,11 +34,13 @@
    [app.config :as cf]
    [app.main.data.changes :as dch]
    [app.main.data.event :as ev]
+   [app.main.data.exports.assets :as de]
    [app.main.data.exports.wasm :as wasm.exports]
    [app.main.data.helpers :as dsh]
    [app.main.data.notifications :as ntf]
    [app.main.data.persistence :as dps]
    [app.main.data.workspace.media :as dwm]
+   [app.main.data.workspace.path.clipboard :as path-cp]
    [app.main.data.workspace.selection :as dws]
    [app.main.data.workspace.shapes :as dwsh]
    [app.main.data.workspace.texts :as dwtxt]
@@ -291,45 +293,22 @@
              (rx/mapcat
               (fn [pdata]
                 (case (:type pdata)
-                  :copied-props  (rx/of (paste-transit-props pdata))
-                  :copied-shapes (rx/of (paste-transit-shapes pdata))
+                  :copied-props        (rx/of (paste-transit-props pdata))
+                  :copied-shapes       (rx/of (paste-transit-shapes pdata))
+                  :copied-path-content (rx/of (path-cp/paste-nodes-as-shape (:content pdata)))
                   (rx/empty)))))
 
         :else
         (->> (rx/from (.text blob))
              (rx/map paste-text))))))
 
-(defn- clipboard-permission-error?
-  "Check if the given error is a clipboard permission error
-  (NotAllowedError DOMException)."
-  [cause]
-  (and (instance? js/DOMException cause)
-       (= (.-name cause) "NotAllowedError")))
-
-(defn- clipboard-unavailable-error?
-  "Check if the given error is a clipboard API unavailable error
-  (thrown when navigator.clipboard is undefined, e.g. on insecure
-   origins per the W3C Secure Contexts spec)."
-  [cause]
-  (and (instance? js/Error cause)
-       (str/starts-with? (.-message cause) "Clipboard API is unavailable.")))
-
 (defn- on-clipboard-permission-error
   [cause]
-  (cond
-    (clipboard-permission-error? cause)
-    (rx/of (ntf/show {:content (tr "errors.clipboard-permission-denied")
+  (if-let [message (clipboard/error-message cause)]
+    (rx/of (ntf/show {:content message
                       :type :toast
                       :level :warning
                       :timeout 5000}))
-
-    (clipboard-unavailable-error? cause)
-    (rx/of (ntf/show {:content (tr "errors.clipboard-api-unavailable")
-                      :type :toast
-                      :level :warning
-                      :timeout 5000}))
-
-    :else
     (rx/throw cause)))
 
 (defn paste-from-clipboard
@@ -378,9 +357,11 @@
 
             shapes          (mapv maybe-translate selected)
             svg-formatted   (svg/generate-formatted-markup objects shapes)]
-        (clipboard/to-clipboard-multi
-         {"image/svg+xml" svg-formatted
-          "text/plain"    svg-formatted})))))
+        (-> (clipboard/to-clipboard-multi
+             {"image/svg+xml" svg-formatted
+              "text/plain"    svg-formatted})
+            (p/catch (fn [cause]
+                       (js/console.error "clipboard error:" cause))))))))
 
 (defn copy-selected-css
   []
@@ -524,26 +505,16 @@
                   (-> entry t/decode-str paste-transit-props))
 
                 (on-error [cause]
-                  (cond
-                    (clipboard-permission-error? cause)
-                    (rx/of (ntf/show {:content (tr "errors.clipboard-permission-denied")
+                  (if-let [message (clipboard/error-message cause)]
+                    (rx/of (ntf/show {:content message
                                       :type :toast
                                       :level :warning
                                       :timeout 5000}))
-
-                    (clipboard-unavailable-error? cause)
-                    (rx/of (ntf/show {:content (tr "errors.clipboard-api-unavailable")
-                                      :type :toast
-                                      :level :warning
-                                      :timeout 5000}))
-
-                    (:not-implemented (ex-data cause))
-                    (rx/of (ntf/warn (tr "errors.clipboard-not-implemented")))
-
-                    :else
-                    (do
-                      (js/console.error "Clipboard error:" cause)
-                      (rx/empty))))]
+                    (if (:not-implemented (ex-data cause))
+                      (rx/of (ntf/warn (tr "errors.clipboard-not-implemented")))
+                      (do
+                        (js/console.error "Clipboard error:" cause)
+                        (rx/empty)))))]
 
           (->> (clipboard/from-navigator default-options)
                (rx/mapcat #(.text %))
@@ -701,22 +672,38 @@
       ptk/WatchEvent
       (watch [_ state _]
         (let [features (get state :features)
-              selected (dsh/lookup-selected state)]
+              objects  (dsh/lookup-page-objects state)
+              selected (dsh/lookup-selected state)
+
+              ;; With WASM, pasted props change the text content but not the
+              ;; selrect, so auto-grow text shapes need an explicit relayout.
+              text-ids (into []
+                             (comp (filter #(cfh/text-shape? (get objects %)))
+                                   (filter #(not= :fixed (:grow-type (get objects %)))))
+                             selected)]
 
           (when (paste-data-valid? pdata)
             (cfeat/check-paste-features! features (:features pdata))
             (case (:type pdata)
               :copied-props
-
-              (rx/concat
-               (->> (rx/of pdata)
-                    (rx/mapcat (partial upload-images (:current-file-id state)))
-                    (rx/map
-                     #(dwsh/update-shapes
-                       selected
-                       (fn [shape objects] (cts/patch-props shape (:props pdata) objects))
-                       {:with-objects? true})))
-               (rx/of (ptk/data-event :layout/update {:ids selected})))
+              ;; Wrap in a single undo transaction so the async wasm text
+              ;; resize is bundled with the props change (one undo step).
+              (let [undo-id       (js/Symbol)
+                    resize-texts? (and (features/active-feature? state "render-wasm/v1")
+                                       (seq text-ids))]
+                (rx/concat
+                 (rx/of (dwu/start-undo-transaction undo-id))
+                 (->> (rx/of pdata)
+                      (rx/mapcat (partial upload-images (:current-file-id state)))
+                      (rx/map
+                       #(dwsh/update-shapes
+                         selected
+                         (fn [shape objects] (cts/patch-props shape (:props pdata) objects))
+                         {:with-objects? true})))
+                 (rx/of (ptk/data-event :layout/update {:ids selected}))
+                 (if resize-texts?
+                   (rx/of (dwwt/resize-wasm-text-all text-ids {:undo-id undo-id}))
+                   (rx/of (dwu/commit-undo-transaction undo-id)))))
               ;;
               (rx/empty))))))))
 
@@ -1138,6 +1125,15 @@
     (watch [_ _ _]
       (clipboard/to-clipboard (rt/get-current-href)))))
 
+(defn copy-id-to-clipboard
+  [id]
+  (ptk/reify ::copy-id-to-clipboard
+    ptk/WatchEvent
+    (watch [_ _ _]
+      (->> (rx/from (clipboard/to-clipboard id))
+           (rx/map (fn [_]
+                     (ntf/info "The id has been copied to the clipboard")))))))
+
 (defn copy-as-image
   []
   (ptk/reify ::copy-as-image
@@ -1147,16 +1143,16 @@
             page-id  (:current-page-id state)
             selected (first (dsh/lookup-selected state))
 
-            export {:file-id file-id
-                    :page-id page-id
-                    :object-id selected
-                    ;; webp would be preferrable, but PNG is the most supported image MIME type by clipboard APIs.
-                    :type :png
-                    ;; Always use 2 to ensure good enough quality for wireframes.
-                    :scale 2
-                    :suffix ""
-                    :enabled true
-                    :name ""}
+            export (de/normalize-export {:file-id file-id
+                                         :page-id page-id
+                                         :object-id selected
+                                         ;; webp would be preferrable, but PNG is the most supported image MIME type by clipboard APIs.
+                                         :type :png
+                                         ;; Always use 2 to ensure good enough quality for wireframes.
+                                         :scale 2
+                                         :suffix ""
+                                         :enabled true
+                                         :name ""})
 
             ;; Create a deferred promise immediately, before any async operations.
             ;; Registering the clipboard write NOW preserves the user-gesture security
@@ -1189,7 +1185,7 @@
               (rx/mapcat (fn [blob]
                            ;; Resolve the deferred with the fetched blob; the browser
                            ;; will now complete the clipboard write it started earlier.
-                           (p/resolve! deferred blob)
+                           (p/resolve deferred blob)
                            (rx/from write-promise)))
               (rx/map (fn [_]
                         (ntf/success (tr "workspace.clipboard.image-copied"))))
@@ -1197,5 +1193,5 @@
                           (js/console.error "clipboard error:" e)
                           ;; Reject the deferred in case the error occurred before the
                           ;; blob was fetched, so the pending clipboard write is cancelled.
-                          (p/reject! deferred e)
+                          (p/reject deferred e)
                           (rx/of (ntf/error (tr "workspace.clipboard.image-copy-failed")))))))))))

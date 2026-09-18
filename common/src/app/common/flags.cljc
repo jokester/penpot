@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.common.flags
   "Flags parsing algorithm."
@@ -100,6 +100,10 @@
     :backend-svgo
     ;; If enabled, it makes the Google Fonts available.
     :google-fonts-provider
+    ;; Enables the Ladybug graph subsystem: the `/dbg` graph console and its
+    ;; actions. Off by default. With the flag off, `app.graph.*` never loads,
+    ;; so the Ladybug native library never enters the JVM.
+    :graph
     ;; Only for development.
     :nrepl-server
     ;; Interactive repl. Only for development.
@@ -147,7 +151,6 @@
     :render-switch
     :hide-release-modal
     :subscriptions
-    :subscriptions-old
     :inspect-styles
     ;; Enable performance logs in devconsole (disabled by default)
     :perf-logs
@@ -164,13 +167,30 @@
     ;; redis for caching data
     :redis-cache
 
-    ;; Activates the nitrate module
-    :nitrate
+    ;; Activates the admin-console module
+    :admin-console
+
+    ;; disabled by default. When enabled, allows the admin-console
+    ;; `bulk-create-profiles` method to create batches of already
+    ;; active profiles. Only intended for test environments.
+    :admin-console-bulk-create-profiles
 
     :mcp
     :background-blur
     :available-viewer-wasm
-    :stroke-path})
+    :stroke-path
+    :stroke-per-side
+
+    ;; Exporter only: uses render-wasm for export instead of browser
+    ;; renderer.
+    :wasm-export
+    :custom-shortcuts
+    :remote-media-processing
+
+    ;; Enables serving link preview (Open Graph) metadata for shared
+    ;; links; exposes file names and dashboard thumbnails to anyone
+    ;; that knows the file id.
+    :link-preview})
 
 (def all-flags
   (set/union email login varia))
@@ -204,6 +224,7 @@
    :enable-render-wasm-info
    :enable-available-viewer-wasm
    :enable-background-blur
+   :enable-stroke-path
    :enable-token-combobox])
 
 (defn parse

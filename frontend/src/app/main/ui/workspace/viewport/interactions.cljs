@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.workspace.viewport.interactions
   "Visually show shape interactions in workspace"
@@ -258,7 +258,7 @@
 
             dest-shape (cond-> dest-shape
                          (some? thumbnail-data)
-                         (assoc :thumbnail thumbnail-data))]
+                         (assoc :thumbnail (:uri thumbnail-data)))]
         [:g {:on-pointer-down start-move-position
              :on-pointer-enter #(reset! is-hover-disabled true)
              :on-pointer-leave #(reset! is-hover-disabled false)}

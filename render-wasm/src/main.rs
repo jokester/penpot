@@ -20,9 +20,10 @@ use std::collections::HashMap;
 
 #[allow(unused_imports)]
 use crate::error::{Error, Result};
+use crate::render::raster::RasterFormat;
 use crate::render::{FrameType, RenderFlag};
 
-use globals::{get_design_state, get_gpu_state, get_render_state};
+use globals::{get_design_state, get_gpu_state, get_render_state, get_resources, has_render_state};
 
 use macros::wasm_error;
 use math::{Bounds, Matrix};
@@ -47,47 +48,6 @@ pub extern "C" fn set_render_options(debug: u32, dpr: f32) -> Result<()> {
     let render_state = get_render_state();
     render_state.set_debug_flags(debug);
     render_state.set_dpr(dpr)?;
-    Ok(())
-}
-
-#[no_mangle]
-#[wasm_error]
-pub extern "C" fn set_viewport_interest_area_threshold(
-    viewport_interest_area_threshold: i32,
-) -> Result<()> {
-    let render_state = get_render_state();
-    render_state.set_viewport_interest_area_threshold(viewport_interest_area_threshold);
-    Ok(())
-}
-
-#[no_mangle]
-#[wasm_error]
-pub extern "C" fn set_max_blocking_time_ms(max_blocking_time_ms: i32) -> Result<()> {
-    let render_state = get_render_state();
-    render_state.set_max_blocking_time_ms(max_blocking_time_ms);
-    Ok(())
-}
-
-#[no_mangle]
-#[wasm_error]
-pub extern "C" fn set_node_batch_threshold(node_batch_threshold: i32) -> Result<()> {
-    let render_state = get_render_state();
-    render_state.set_node_batch_threshold(node_batch_threshold);
-    Ok(())
-}
-
-#[no_mangle]
-#[wasm_error]
-pub extern "C" fn set_blur_downscale_threshold(blur_downscale_threshold: f32) -> Result<()> {
-    let render_state = get_render_state();
-    render_state.set_blur_downscale_threshold(blur_downscale_threshold);
-    Ok(())
-}
-
-#[no_mangle]
-#[wasm_error]
-pub extern "C" fn set_antialias_threshold(threshold: f32) -> Result<()> {
-    get_render_state().set_antialias_threshold(threshold);
     Ok(())
 }
 
@@ -232,6 +192,23 @@ pub extern "C" fn render_from_cache(_: i32) -> Result<()> {
         // for the old viewport can be reused by the next full
         // render at the new viewport position.
         state.render_from_cache();
+    });
+    Ok(())
+}
+
+#[no_mangle]
+#[wasm_error]
+pub extern "C" fn render_from_backbuffer() -> Result<()> {
+    with_state!(state, {
+        // Re-present the last fully rendered frame from the Backbuffer with the
+        // UI overlay (rulers) redrawn on top. Unlike `render_from_cache`, it does
+        // NOT rebuild the Backbuffer from the document tile atlas — that atlas is
+        // capped at scale <= 1.0, so on a zoomed-in view its blit is a blurry
+        // upscale and swapping it in reads as a flash. Reusing the Backbuffer is
+        // pixel-identical at any zoom. Only valid on a stable viewbox (the
+        // Backbuffer must still match the current view); pan/zoom keeps using
+        // `render_from_cache`.
+        state.present_frame();
     });
     Ok(())
 }
@@ -453,16 +430,6 @@ pub extern "C" fn has_shape(a: u32, b: u32, c: u32, d: u32) -> Result<bool> {
 
 #[no_mangle]
 #[wasm_error]
-pub extern "C" fn touch_shape(a: u32, b: u32, c: u32, d: u32) -> Result<()> {
-    with_state!(state, {
-        let shape_id = uuid_from_u32_quartet(a, b, c, d);
-        state.touch_shape(shape_id);
-    });
-    Ok(())
-}
-
-#[no_mangle]
-#[wasm_error]
 pub extern "C" fn set_parent(a: u32, b: u32, c: u32, d: u32) -> Result<()> {
     with_state!(state, {
         let id = uuid_from_u32_quartet(a, b, c, d);
@@ -523,44 +490,9 @@ pub extern "C" fn set_shape_transform(
     Ok(())
 }
 
-#[no_mangle]
-#[wasm_error]
-pub extern "C" fn add_shape_child(a: u32, b: u32, c: u32, d: u32) -> Result<()> {
-    with_current_shape_mut!(state, |shape: &mut Shape| {
-        let id = uuid_from_u32_quartet(a, b, c, d);
-        shape.add_child(id);
-    });
-    Ok(())
-}
-
 fn set_children_set(entries: Vec<Uuid>) -> Result<()> {
-    let mut deleted = Vec::new();
-    let mut parent_id = None;
-
-    with_current_shape_mut!(state, |shape: &mut Shape| {
-        parent_id = Some(shape.id);
-        (_, deleted) = shape.compute_children_differences(&entries);
-        shape.children = entries.clone();
-
-        for id in entries {
-            state.touch_shape(id);
-            if let Some(children_shape) = state.shapes.get_mut(&id) {
-                children_shape.set_deleted(false);
-            }
-        }
-    });
-
     with_state!(state, {
-        let Some(parent_id) = parent_id else {
-            return Err(Error::RecoverableError(
-                "set_children_set: Parent ID not found".to_string(),
-            ));
-        };
-
-        for id in deleted {
-            state.delete_shape_children(parent_id, id);
-            state.touch_shape(id);
-        }
+        state.set_current_shape_children(entries)?;
     });
     Ok(())
 }
@@ -569,124 +501,6 @@ fn set_children_set(entries: Vec<Uuid>) -> Result<()> {
 #[wasm_error]
 pub extern "C" fn set_children_0() -> Result<()> {
     let entries = vec![];
-    set_children_set(entries)?;
-    Ok(())
-}
-
-#[no_mangle]
-#[wasm_error]
-pub extern "C" fn set_children_1(a1: u32, b1: u32, c1: u32, d1: u32) -> Result<()> {
-    let entries = vec![uuid_from_u32_quartet(a1, b1, c1, d1)];
-    set_children_set(entries)?;
-    Ok(())
-}
-
-#[no_mangle]
-#[wasm_error]
-pub extern "C" fn set_children_2(
-    a1: u32,
-    b1: u32,
-    c1: u32,
-    d1: u32,
-    a2: u32,
-    b2: u32,
-    c2: u32,
-    d2: u32,
-) -> Result<()> {
-    let entries = vec![
-        uuid_from_u32_quartet(a1, b1, c1, d1),
-        uuid_from_u32_quartet(a2, b2, c2, d2),
-    ];
-    set_children_set(entries)?;
-    Ok(())
-}
-
-#[no_mangle]
-#[wasm_error]
-pub extern "C" fn set_children_3(
-    a1: u32,
-    b1: u32,
-    c1: u32,
-    d1: u32,
-    a2: u32,
-    b2: u32,
-    c2: u32,
-    d2: u32,
-    a3: u32,
-    b3: u32,
-    c3: u32,
-    d3: u32,
-) -> Result<()> {
-    let entries = vec![
-        uuid_from_u32_quartet(a1, b1, c1, d1),
-        uuid_from_u32_quartet(a2, b2, c2, d2),
-        uuid_from_u32_quartet(a3, b3, c3, d3),
-    ];
-    set_children_set(entries)?;
-    Ok(())
-}
-
-#[no_mangle]
-#[wasm_error]
-pub extern "C" fn set_children_4(
-    a1: u32,
-    b1: u32,
-    c1: u32,
-    d1: u32,
-    a2: u32,
-    b2: u32,
-    c2: u32,
-    d2: u32,
-    a3: u32,
-    b3: u32,
-    c3: u32,
-    d3: u32,
-    a4: u32,
-    b4: u32,
-    c4: u32,
-    d4: u32,
-) -> Result<()> {
-    let entries = vec![
-        uuid_from_u32_quartet(a1, b1, c1, d1),
-        uuid_from_u32_quartet(a2, b2, c2, d2),
-        uuid_from_u32_quartet(a3, b3, c3, d3),
-        uuid_from_u32_quartet(a4, b4, c4, d4),
-    ];
-    set_children_set(entries)?;
-    Ok(())
-}
-
-#[no_mangle]
-#[wasm_error]
-pub extern "C" fn set_children_5(
-    a1: u32,
-    b1: u32,
-    c1: u32,
-    d1: u32,
-    a2: u32,
-    b2: u32,
-    c2: u32,
-    d2: u32,
-    a3: u32,
-    b3: u32,
-    c3: u32,
-    d3: u32,
-    a4: u32,
-    b4: u32,
-    c4: u32,
-    d4: u32,
-    a5: u32,
-    b5: u32,
-    c5: u32,
-    d5: u32,
-) -> Result<()> {
-    let entries = vec![
-        uuid_from_u32_quartet(a1, b1, c1, d1),
-        uuid_from_u32_quartet(a2, b2, c2, d2),
-        uuid_from_u32_quartet(a3, b3, c3, d3),
-        uuid_from_u32_quartet(a4, b4, c4, d4),
-        uuid_from_u32_quartet(a5, b5, c5, d5),
-    ];
     set_children_set(entries)?;
     Ok(())
 }
@@ -720,8 +534,20 @@ pub extern "C" fn is_image_cached(
     is_thumbnail: bool,
 ) -> Result<bool> {
     let id = uuid_from_u32_quartet(a, b, c, d);
-    let result = get_render_state().has_image(&id, is_thumbnail);
+    let result = get_resources().images.contains(&id, is_thumbnail);
     Ok(result)
+}
+
+/// Evicts least-recently-used images until the store retains at most
+/// `max_bytes` bytes of image data. Called by the headless exporter between
+/// requests — never mid-render, so an image can't disappear under a running
+/// export; evicted images are re-provisioned by later requests that need
+/// them. Returns the number of evicted images.
+#[no_mangle]
+#[wasm_error]
+pub extern "C" fn evict_images_to_budget(max_bytes: u32) -> Result<u32> {
+    let evicted = get_resources().images.evict_to_budget(max_bytes as usize);
+    Ok(evicted as u32)
 }
 
 #[no_mangle]
@@ -734,8 +560,7 @@ pub extern "C" fn set_shape_svg_raw_content() -> Result<()> {
             .trim_end_matches('\0')
             .to_string();
 
-        let render_state = get_render_state();
-        let font_manager = skia::FontMgr::from(render_state.fonts().font_provider().clone());
+        let font_manager = skia::FontMgr::from(get_resources().fonts.font_provider().clone());
         shape.set_svg_raw_content(svg_raw_content);
         shape.update_svg_raw_content(font_manager);
     });
@@ -881,7 +706,7 @@ pub extern "C" fn clean_modifiers() -> Result<()> {
         // the same tiles for the active modifier set, so the eviction
         // here is redundant and doubles the per-emission cost.
         if !prev_modifier_ids.is_empty() && !render_state.options.is_interactive_transform() {
-            render_state.update_tiles_shapes(&prev_modifier_ids, &mut state.shapes)?;
+            render_state.update_tiles_shapes(&prev_modifier_ids, &state.shapes)?;
         }
     });
     Ok(())
@@ -946,6 +771,9 @@ pub extern "C" fn get_shape_extrect(a: u32, b: u32, c: u32, d: u32) -> Result<*m
     })
 }
 
+/// Raster image via the GPU surface. Returns `[len][width][height][bytes]`
+/// (LE). `format` selects the encoder: 0 = PNG, 1 = JPEG, 2 = WEBP (see
+/// `RasterFormat`).
 #[no_mangle]
 #[wasm_error]
 pub extern "C" fn render_shape_pixels(
@@ -954,6 +782,7 @@ pub extern "C" fn render_shape_pixels(
     c: u32,
     d: u32,
     scale: f32,
+    format: u32,
 ) -> Result<*mut u8> {
     let id = uuid_from_u32_quartet(a, b, c, d);
 
@@ -961,9 +790,11 @@ pub extern "C" fn render_shape_pixels(
         return Err(Error::CriticalError("Scale is not finite".to_string()));
     }
 
+    let format = RasterFormat::from_u32(format)?;
+
     with_state!(state, {
         let (data, width, height) =
-            state.render_shape_pixels(&id, scale, performance::get_time())?;
+            state.render_shape_pixels(&id, scale, performance::get_time(), format)?;
 
         let len = data.len() as u32;
         let mut buf = Vec::with_capacity(4 + data.len());
@@ -996,6 +827,56 @@ pub extern "C" fn render_shape_pdf(a: u32, b: u32, c: u32, d: u32, scale: f32) -
         let len = data.len() as u32;
         let mut buf = Vec::with_capacity(4 + data.len());
         buf.extend_from_slice(&len.to_le_bytes());
+        buf.extend_from_slice(&data);
+        Ok(mem::write_bytes(buf))
+    })
+}
+
+#[no_mangle]
+#[wasm_error]
+pub extern "C" fn render_shape_svg(a: u32, b: u32, c: u32, d: u32, scale: f32) -> Result<*mut u8> {
+    let id = uuid_from_u32_quartet(a, b, c, d);
+
+    with_state!(state, {
+        let data = state.render_shape_svg(&id, scale)?;
+
+        let len = data.len() as u32;
+        let mut buf = Vec::with_capacity(4 + data.len());
+        buf.extend_from_slice(&len.to_le_bytes());
+        buf.extend_from_slice(&data);
+        Ok(mem::write_bytes(buf))
+    })
+}
+
+/// Raster image via CPU (no GPU/WebGL). Returns `[len][width][height][bytes]`
+/// (LE), same layout as `render_shape_pixels`. `format` selects the encoder:
+/// 0 = PNG, 1 = JPEG, 2 = WEBP (see `RasterFormat`).
+#[no_mangle]
+#[wasm_error]
+pub extern "C" fn render_shape_raster(
+    a: u32,
+    b: u32,
+    c: u32,
+    d: u32,
+    scale: f32,
+    format: u32,
+) -> Result<*mut u8> {
+    let id = uuid_from_u32_quartet(a, b, c, d);
+
+    if !scale.is_finite() {
+        return Err(Error::CriticalError("Scale is not finite".to_string()));
+    }
+
+    let format = RasterFormat::from_u32(format)?;
+
+    with_state!(state, {
+        let (data, width, height) = state.render_shape_raster(&id, scale, format)?;
+
+        let len = data.len() as u32;
+        let mut buf = Vec::with_capacity(12 + data.len());
+        buf.extend_from_slice(&len.to_le_bytes());
+        buf.extend_from_slice(&width.to_le_bytes());
+        buf.extend_from_slice(&height.to_le_bytes());
         buf.extend_from_slice(&data);
         Ok(mem::write_bytes(buf))
     })

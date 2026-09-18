@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.workspace.viewport.top-bar
   (:require-macros [app.main.style :as stl])
@@ -12,7 +12,7 @@
    [app.main.refs :as refs]
    [app.main.store :as st]
    [app.main.ui.ds.buttons.button :refer [button*]]
-   [app.main.ui.workspace.viewport.grid-layout-editor :refer [grid-edition-actions]]
+   [app.main.ui.workspace.viewport.grid-layout-editor :refer [grid-edition-actions*]]
    [app.main.ui.workspace.viewport.path-actions :refer [path-actions*]]
    [app.util.i18n :as i18n :refer [tr]]
    [rumext.v2 :as mf]))
@@ -55,4 +55,24 @@
 
 (mf/defc grid-edition-bar*
   [{:keys [shape]}]
-  [:& grid-edition-actions {:shape shape}])
+  [:> grid-edition-actions* {:shape shape}])
+
+(mf/defc edition-bars*
+  [{:keys [layout
+           path-editing
+           path-drawing
+           path-state
+           path-shape
+           grid-editing
+           grid-shape
+           single-select]}]
+  [:*
+   (when (or (and ^boolean path-editing ^boolean single-select)
+             (and ^boolean path-drawing (some? path-state)))
+     [:> path-edition-bar* {:shape path-shape
+                            :edit-path-state path-state
+                            :layout layout}])
+
+   (when (and ^boolean grid-editing ^boolean single-select)
+     [:> grid-edition-bar* {:shape grid-shape}])])
+

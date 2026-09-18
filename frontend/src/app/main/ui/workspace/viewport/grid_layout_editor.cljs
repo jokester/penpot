@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.workspace.viewport.grid-layout-editor
   (:require-macros [app.main.style :as stl])
@@ -28,6 +28,7 @@
    [app.main.refs :as refs]
    [app.main.store :as st]
    [app.main.ui.css-cursors :as cur]
+   [app.main.ui.ds.buttons.button :refer [button*]]
    [app.main.ui.formats :as fmt]
    [app.main.ui.icons :as deprecated-icon]
    [app.main.ui.workspace.viewport.viewport-ref :as uwvv]
@@ -52,18 +53,17 @@
     :flex (dm/str (fmt/format-number value) "FR")
     :auto "AUTO"))
 
-(mf/defc grid-edition-actions
-  {::mf/wrap-props false}
+(mf/defc grid-edition-actions*
   [{:keys [shape]}]
   [:div {:class (stl/css :grid-actions)}
    [:div {:class (stl/css :grid-actions-container)}
     [:div {:class (stl/css :grid-actions-title)}
      (tr "workspace.layout-grid.editor.title")  " " [:span {:stl/css :board-name} (:name shape)]]
-    [:button {:class (stl/css :locate-btn)
-              :on-click #(st/emit! (dwge/locate-board (:id shape)))}
+    [:> button* {:variant "secondary"
+                 :on-click #(st/emit! (dwge/locate-board (:id shape)))}
      (tr "workspace.layout-grid.editor.top-bar.locate")]
-    [:button {:class (stl/css :done-btn)
-              :on-click #(st/emit! (dw/clear-edition-mode))}
+    [:> button* {:variant "primary"
+                 :on-click #(st/emit! (dw/clear-edition-mode))}
      (tr "workspace.layout-grid.editor.top-bar.done")]]])
 
 (mf/defc grid-editor-frame

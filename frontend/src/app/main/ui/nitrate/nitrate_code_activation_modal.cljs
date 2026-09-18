@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.nitrate.nitrate-code-activation-modal
   (:require-macros [app.main.style :as stl])
@@ -17,6 +17,7 @@
    [app.main.ui.nitrate.nitrate-activation-success-modal]
    [app.util.dom :as dom]
    [app.util.i18n :refer [tr]]
+   [app.util.webapi :as wapi]
    [beicon.v2.core :as rx]
    [cuerdas.core :as str]
    [rumext.v2 :as mf]))
@@ -52,10 +53,10 @@
                           (modal/show {:type :nitrate-activation-success})
                           (dprof/refresh-profile))))
                      (fn [error]
-                       ;; TODO: "Already used" is not yet detectable (CC upserts on reuse).
                        (let [code (-> error ex-data :code)]
                          (reset! error* (case code
                                           :expired-activation-code (tr "nitrate.activation-code.expired-error")
+                                          :used-activation-code    (tr "nitrate.activation-code.used-error")
                                           (tr "nitrate.activation-code.invalid-error")))))))))))
 
         on-key-down
@@ -63,7 +64,16 @@
          (mf/deps on-accept)
          (fn [event]
            (when (and (= "Enter" (.-key event)) (.-ctrlKey event))
-             (on-accept event))))]
+             (on-accept event))))
+
+        on-download-request-click
+        (mf/use-fn
+         (fn []
+           (->> (rp/cmd! :get-nitrate-activation-code-request {})
+                (rx/subs!
+                 (fn [body]
+                   (->> (wapi/create-blob body "text/plain")
+                        (dom/trigger-download "penpot-activation-code-request.txt")))))))]
 
     [:div {:class (stl/css :modal-overlay)}
      [:div {:class (stl/css :modal-dialog)}
@@ -101,7 +111,16 @@
           :value (tr "nitrate.code-activation.submit")
           :on-click on-accept}]]
        [:div {:class (stl/css :footer-text)}
-        (tr "nitrate.code-activation.footer") " "
-        [:a {:class (stl/css :link)
-             :href "mailto:sales@nitrate.com"}
-         "sales@nitrate.com"]]]]]))
+        [:div {:class (stl/css :code-label)} (tr "nitrate.code-activation.footer-title")]
+        [:div
+
+         [:a {:class (stl/css :link)
+              :on-click on-download-request-click}
+          (tr "nitrate.code-activation.footer-download")]]
+        [:div
+         (tr "nitrate.code-activation.footer-after") " "
+         [:a {:class (stl/css :link)
+              :href "mailto:sales@penpot.app"}
+          "sales@penpot.app"]
+         " "
+         (tr "nitrate.code-activation.footer-before")]]]]]))

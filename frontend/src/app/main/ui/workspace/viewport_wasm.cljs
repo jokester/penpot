@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.workspace.viewport-wasm
   (:require-macros [app.main.style :as stl])
@@ -13,7 +13,6 @@
    [app.common.geom.shapes :as gsh]
    [app.common.types.color :as clr]
    [app.common.types.component :as ctk]
-   [app.common.types.path :as path]
    [app.common.types.shape :as cts]
    [app.common.types.shape.layout :as ctl]
    [app.main.data.modal :as modal]
@@ -44,6 +43,7 @@
    [app.main.ui.workspace.viewport.hooks :as hooks]
    [app.main.ui.workspace.viewport.interactions :as interactions]
    [app.main.ui.workspace.viewport.outline :as outline]
+   [app.main.ui.workspace.viewport.path-state :as path-state]
    [app.main.ui.workspace.viewport.pixel-overlay :as pixel-overlay]
    [app.main.ui.workspace.viewport.presence :as presence]
    [app.main.ui.workspace.viewport.rulers :as rulers]
@@ -51,7 +51,8 @@
    [app.main.ui.workspace.viewport.selection :as selection]
    [app.main.ui.workspace.viewport.snap-distances :as snap-distances]
    [app.main.ui.workspace.viewport.snap-points :as snap-points]
-   [app.main.ui.workspace.viewport.top-bar :refer [path-edition-bar* grid-edition-bar* view-only-bar*]]
+   [app.main.ui.workspace.viewport.top-bar :refer [edition-bars*
+                                                   view-only-bar*]]
    [app.main.ui.workspace.viewport.utils :as utils]
    [app.main.ui.workspace.viewport.viewport-ref :as vp-ref :refer [create-viewport-ref]]
    [app.main.ui.workspace.viewport.widgets :as widgets]
@@ -280,21 +281,22 @@
         ;; Only when we have all the selected shapes in one frame
         selected-frame    (when (= (count selected-frames) 1) (get base-objects (first selected-frames)))
 
-        edit-path-state   (get edit-path edition)
-        edit-path-mode    (get edit-path-state :edit-mode)
+        {:keys [edit-state
+                editing?
+                drawing?
+                editing-shape
+                bar-state
+                bar-shape
+                drawing-shape]}
+        (mf/with-memo [edit-path edition drawing-tool drawing-obj base-objects]
+          (path-state/derive-path-state edit-path edition drawing-tool drawing-obj base-objects))
 
-        path-editing?     (some? edit-path-state)
-        path-drawing?     (or (= edit-path-mode :draw)
-                              (and (= :path (get drawing-obj :type))
-                                   (not= :curve drawing-tool)))
-
-        editing-shape     (when edition
-                            (get base-objects edition))
-
-        editing-shape     (mf/with-memo [editing-shape path-editing? base-objects]
-                            (if path-editing?
-                              (path/convert-to-path editing-shape base-objects)
-                              editing-shape))
+        edit-path-state   edit-state
+        path-editing?     editing?
+        path-drawing?     drawing?
+        path-bar-state    bar-state
+        path-bar-shape    bar-shape
+        draw-area-shape   drawing-shape
 
         create-comment?   (= :comments drawing-tool)
 
@@ -370,8 +372,9 @@
         show-snap-points?        (and (or (contains? layout :dynamic-alignment)
                                           (contains? layout :snap-guides))
                                       (or drawing-obj transform)
+                                      (not path-editing?)
                                       (not page-transition?))
-        show-selrect?            (and selrect (empty? drawing) (not text-editing?) (not page-transition?))
+        show-selrect?            (and selrect (or (empty? drawing) path-editing?) (not text-editing?) (not page-transition?))
         show-measures?           (and (not transform)
                                       (not path-editing?)
                                       (or show-distances? mode-inspect? read-only?)
@@ -573,19 +576,33 @@
            (wasm.api/push-ruler-theme-colors!)
            (wasm.api/request-render "rulers-colors-theme")))))
 
-    ;; Ruler overlay updates below only change the UI surface, not the shapes.
-    ;; They use `render-from-cache!` (cached tiles + UI, atomic) instead of a full
-    ;; `request-render`, which would kick off a progressive tile-by-tile shape
-    ;; re-render that flashes on zoomed-in views (see penpot ruler-selection flash).
+    ;; Text-editor-wasm: push the theme colors (selection background, caret)
+    ;; into the WASM text editor so the selection follows the design tokens per
+    ;; theme (purple on light, teal on dark) instead of a hardcoded default.
+    (mf/with-effect [@canvas-init?]
+      (when @canvas-init?
+        (wasm.api/text-editor-apply-theme)
+        (theme/add-color-scheme-listener!
+         (fn []
+           (wasm.api/text-editor-apply-theme)
+           (wasm.api/request-render "text-editor-colors-theme")))))
+
+    ;; Ruler overlay updates below only change the UI surface, not the shapes,
+    ;; and they fire on a stable viewbox (toggles / selection changes, not pan).
+    ;; They re-present via `render-from-backbuffer!` — reusing the crisp last
+    ;; frame + fresh UI — instead of a full `request-render` (which would kick
+    ;; off a progressive tile-by-tile re-render that flashes) or a cached-atlas
+    ;; blit (whose scale-capped atlas flashes crisp->blurry on zoomed-in views,
+    ;; e.g. when the text editor opens at high zoom).
     (mf/with-effect [@canvas-init? frame-visible?]
       (when @canvas-init?
         (wasm.api/set-rulers-frame-visible! frame-visible?)
-        (wasm.api/render-from-cache!)))
+        (wasm.api/render-from-backbuffer!)))
 
     (mf/with-effect [@canvas-init? show-rulers?]
       (when @canvas-init?
         (wasm.api/set-rulers-visible! show-rulers?)
-        (wasm.api/render-from-cache!)))
+        (wasm.api/render-from-backbuffer!)))
 
     (mf/with-effect [@canvas-init? show-rulers? offset-x offset-y]
       (when (and @canvas-init? show-rulers?)
@@ -596,7 +613,7 @@
                      (some-> ruler-selection :width) (some-> ruler-selection :height)]
       (when (and @canvas-init? show-rulers?)
         (wasm.api/set-rulers-selection! ruler-selection)
-        (wasm.api/render-from-cache!)))
+        (wasm.api/render-from-backbuffer!)))
 
     ;; Paint background + rulers instantly, before shapes finish loading. Runs
     ;; after the ruler push effects so the WASM ruler state is already set.
@@ -613,12 +630,23 @@
 
     (hooks/setup-dom-events zoom disable-paste-ref in-viewport-ref read-only? drawing-tool path-drawing?)
     (hooks/setup-viewport-size vport viewport-ref)
-    (hooks/setup-cursor cursor alt? mod? space? panning drawing-tool path-drawing? path-editing? z? read-only?)
+    (hooks/setup-cursor cursor alt? mod? space? panning drawing-tool path-drawing? path-editing? (get path-bar-state :drag-cursor) z? read-only?)
     (hooks/setup-keyboard alt? mod? space? z? shift?)
     (hooks/setup-hover-shapes page-id move-stream base-objects selected mod? hover measure-hover
                               hover-ids hover-top-frame-id @hover-disabled? focus zoom show-measures? read-only? transform)
     (hooks/setup-shortcuts path-editing? path-drawing? text-editing? grid-editing?)
     (hooks/setup-active-frames base-objects hover-ids selected active-frames zoom transform vbox)
+
+    (mf/with-effect [path-editing? edition @initialized?]
+      (when (and path-editing? edition @initialized?)
+        (wasm.api/use-shape edition)
+        (wasm.api/set-shape-hidden true)
+        (wasm.api/request-render "start-path-edition")
+        (fn []
+          (when (wasm.api/initialized?)
+            (wasm.api/use-shape edition)
+            (wasm.api/set-shape-hidden false)
+            (wasm.api/request-render "stop-path-edition")))))
 
     [:div {:class (stl/css :viewport) :style #js {"--zoom" zoom} :data-testid "viewport"}
 
@@ -634,15 +662,14 @@
         (when-not hide-ui?
           [:> top-toolbar* {:layout layout}])
 
-        (when (and ^boolean path-editing?
-                   ^boolean single-select?)
-          [:> path-edition-bar* {:shape editing-shape
-                                 :edit-path-state edit-path-state
-                                 :layout layout}])
-
-        (when (and ^boolean grid-editing?
-                   ^boolean single-select?)
-          [:> grid-edition-bar* {:shape editing-shape}])])
+        [:> edition-bars* {:layout layout
+                           :path-editing path-editing?
+                           :path-drawing path-drawing?
+                           :path-state path-bar-state
+                           :path-shape path-bar-shape
+                           :grid-editing grid-editing?
+                           :grid-shape editing-shape
+                           :single-select single-select?}]])
 
      [:div {:class (stl/css :viewport-overlays)}
       (when show-comments?
@@ -650,7 +677,8 @@
                                       :page-id page-id
                                       :file-id file-id
                                       :vport vport
-                                      :zoom zoom}])
+                                      :zoom zoom
+                                      :show-rulers show-rulers?}])
 
       (when picking-color?
         [:> pixel-overlay/pixel-overlay-wasm* {:viewport-ref viewport-ref
@@ -692,7 +720,8 @@
                        :global/cursor-resize-ew-0 (= @guide-hover-axis* :x)
                        :global/cursor-resize-ns-0 (= @guide-hover-axis* :y)
                        :viewport-controls true))
-       :style {:touch-action "none"}
+       :style {:touch-action "none"
+               :pointer-events (if page-transition? "none" "auto")}
        :fill "none"
        :on-click         on-click
        :on-context-menu  on-context-menu
@@ -780,6 +809,7 @@
                   (not transform)
                   (not text-editing?)
                   (not edition)
+                  (not read-only?)
                   (not mode-inspect?)
                   (not page-transition?))
          [:> msr/selection-size-badge*
@@ -847,7 +877,7 @@
        (when (and ^boolean show-draw-area?
                   ^boolean (cts/shape? drawing-obj))
          [:> drawarea/draw-area*
-          {:shape drawing-obj
+          {:shape draw-area-shape
            :zoom zoom
            :tool drawing-tool}])
 

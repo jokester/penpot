@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.rpc.commands.files-snapshot
   (:require
@@ -22,6 +22,7 @@
    [app.rpc.commands.files :as files]
    [app.rpc.commands.teams :as teams]
    [app.rpc.doc :as-alias doc]
+   [app.rpc.permissions :as perms]
    [app.rpc.quotes :as quotes]
    [app.util.services :as sv]))
 
@@ -33,8 +34,8 @@
   {::doc/added "1.20"
    ::sm/params schema:get-file-snapshots}
   [cfg {:keys [::rpc/profile-id file-id] :as params}]
-  (db/run! cfg (fn [{:keys [::db/conn]}]
-                 (files/check-read-permissions! conn profile-id file-id)
+  (db/run! cfg (fn [{:keys [::db/conn] :as cfg}]
+                 (files/check-read-permissions! cfg profile-id file-id)
                  (fsnap/get-visible-snapshots conn file-id))))
 
 ;; --- COMMAND QUERY: get-file-snapshot
@@ -52,8 +53,8 @@
    ::sm/params schema:get-file-snapshot
    ::sm/result files/schema:file-with-permissions
    ::db/transaction true}
-  [{:keys [::db/conn] :as cfg} {:keys [::rpc/profile-id file-id id] :as params}]
-  (let [perms (bfc/get-file-permissions conn profile-id file-id)]
+  [cfg {:keys [::rpc/profile-id file-id id] :as params}]
+  (let [perms (perms/get-file-read-permissions cfg profile-id file-id)]
     (files/check-read-permissions! perms)
     (let [snapshot (fsnap/get-snapshot cfg file-id id)]
       (when-not snapshot

@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.common.types.shape.layout
   (:require
@@ -346,6 +346,22 @@
     (if (= :simple layout-padding-type)
       (+ pad-top pad-top)
       (+ pad-top pad-bottom))))
+
+(defn padding-type-for
+  "`:simple` when top≈bottom and left≈right, `:multiple` otherwise (nil sides = 0)."
+  [{:keys [p1 p2 p3 p4]}]
+  (if (and (mth/close? (d/nilv p1 0) (d/nilv p3 0))
+           (mth/close? (d/nilv p2 0) (d/nilv p4 0)))
+    :simple
+    :multiple))
+
+(defn margin-type-for
+  "`:simple` when top≈bottom and left≈right, `:multiple` otherwise (nil sides = 0)."
+  [{:keys [m1 m2 m3 m4]}]
+  (if (and (mth/close? (d/nilv m1 0) (d/nilv m3 0))
+           (mth/close? (d/nilv m2 0) (d/nilv m4 0)))
+    :simple
+    :multiple))
 
 (defn child-min-width
   [child]
@@ -1509,20 +1525,71 @@
       (some? target-cell)
       (add-children-to-cell ids objects [(:row target-cell) (:column target-cell)]))))
 
+(defn- refill-slots
+  "Fill matching positions in `shapes` from `ordered`, preserving other indices.
+  `ordered` must contain exactly the ids accepted by `slot?`."
+  [shapes slot? ordered]
+  (loop [shapes  (seq shapes)
+         ordered (seq ordered)
+         result  (transient [])]
+    (if (nil? shapes)
+      (persistent! result)
+      (let [id (first shapes)]
+        (if (slot? id)
+          (recur (next shapes) (next ordered) (conj! result (first ordered)))
+          (recur (next shapes) ordered (conj! result id)))))))
+
 (defn reorder-grid-children
+  "Order cell children by grid position while preserving the indices of
+  hidden and absolute-positioned children."
   [parent]
-  (let [cells (get-cells parent {:sort? true})
+  (let [cells  (get-cells parent {:sort? true})
         child? (set (:shapes parent))
-        new-shapes
-        (into (d/ordered-set)
+
+        in-cell-ids
+        (into []
               (comp (keep (comp first :shapes))
-                    (filter child?))
-              cells)
+                    (filter child?)
+                    (distinct))
+              cells)]
+    ;; :shapes is ordered in reverse relative to the visual cell order
+    (assoc parent :shapes (refill-slots (:shapes parent)
+                                        (set in-cell-ids)
+                                        (reverse in-cell-ids)))))
 
-        ;; Add the children that are not in cells (absolute positioned for example)
-        new-shapes (into new-shapes (:shapes parent))]
+(defn- reflow-eligible-cell?
+  [{:keys [position row-span column-span id]}]
+  (and (= position :auto)
+       (= row-span 1)
+       (= column-span 1)
+       (some? id)))
 
-    (assoc parent :shapes (into [] (reverse new-shapes)))))
+(defn reflow-grid-auto-items-for-direction
+  "Reflow single-span auto cells for `to-dir` without changing explicit
+  placements or `:shapes`."
+  [parent from-dir to-dir]
+  (if (= from-dir to-dir)
+    parent
+    (let [old-auto-ids (->> (assoc parent :layout-grid-dir from-dir)
+                            (#(cells-seq % :sort? true))
+                            (filter reflow-eligible-cell?)
+                            (map :id))
+          new-auto-ids (->> (assoc parent :layout-grid-dir to-dir)
+                            (#(cells-seq % :sort? true))
+                            (filter reflow-eligible-cell?)
+                            (map :id))
+          shapes (vec (mapcat #(get-in parent [:layout-grid-cells % :shapes]) old-auto-ids))]
+      (-> parent
+          (assoc :layout-grid-dir to-dir)
+          (assoc :layout-grid-cells
+                 (reduce
+                  (fn [acc [idx cell-id]]
+                    (let [shape (get shapes idx)]
+                      (assoc acc cell-id
+                             (assoc (get acc cell-id)
+                                    :shapes (if (some? shape) [shape] [])))))
+                  (:layout-grid-cells parent)
+                  (map-indexed vector new-auto-ids)))))))
 
 (defn cells-by-row
   ([parent index]

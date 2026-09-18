@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.util.color
   "FIXME: this is legacy namespace, all functions of this ns should be
@@ -104,3 +104,20 @@
         (cc/valid-hex-color? s)
         (-> (subs s 1) cc/expand-hex cc/prepend-hash)
         :else (some-> (cc/parse-rgb s) cc/rgb->hex)))))
+
+(def ^:private rgba-color-re
+  #"rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*(?:,\s*([0-9]*\.?[0-9]+)\s*)?\)")
+
+(defn parse-css-color-opacity
+  "Like `parse-css-color` but also extracts the alpha channel, returning a
+   `{:color \"#rrggbb\" :opacity <0..1>}` map (opacity defaults to 1 when the
+   source has none). Handles #rrggbb, #rgb, rgb() and rgba(). Returns nil when
+   the string cannot be parsed."
+  [raw]
+  (let [s (some-> raw str/trim)]
+    (when (and (string? s) (seq s))
+      (if (cc/valid-hex-color? s)
+        {:color (-> (subs s 1) cc/expand-hex cc/prepend-hash) :opacity 1}
+        (when-let [[_ r g b a] (re-matches rgba-color-re s)]
+          {:color (cc/rgb->hex [(js/parseInt r 10) (js/parseInt g 10) (js/parseInt b 10)])
+           :opacity (if a (js/parseFloat a) 1)})))))

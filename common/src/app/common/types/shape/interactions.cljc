@@ -2,14 +2,13 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.common.types.shape.interactions
   (:require
    [app.common.data :as d]
    [app.common.files.helpers :as cfh]
    [app.common.geom.point :as gpt]
-   [app.common.geom.shapes.bounds :as gsb]
    [app.common.schema :as sm]
    [app.common.schema.generators :as sg]))
 
@@ -76,7 +75,10 @@
   [:map {:title "AnimationDisolve"}
    [:animation-type [:= :dissolve]]
    [:duration ::sm/safe-int]
-   [:easing [::sm/one-of easing-types]]])
+   [:easing [::sm/one-of easing-types]]
+   [:way {:optional true} [::sm/one-of way-types]]
+   [:offset-effect {:optional true} :boolean]
+   [:direction {:optional true} [::sm/one-of direction-types]]])
 
 (def schema:slide-animation
   [:map {:title "AnimationSlide"}
@@ -479,7 +481,13 @@
 
     (if (nil? dest-frame)
       [(gpt/point 0 0) [:top :left]]
-      (let [overlay-size           (gsb/get-object-bounds objects dest-frame)
+      (let [;; Use the destination frame selrect (the visible frame box) to compute
+            ;; the overlay position, not its full object bounds. Bounds include
+            ;; padding for shadows, blur, strokes and overflowing children, which
+            ;; would make centered/right/bottom positions off by half that padding
+            ;; (the visible frame ends up shifted). The viewer reserves the bounds
+            ;; size and re-aligns the selrect separately (see viewer/calculate-delta).
+            overlay-size           (:selrect dest-frame)
             base-frame-size        (:selrect base-frame)
             relative-to-shape-size (:selrect relative-to-shape)
             relative-to-adjusted-to-base-frame {:x (- (:x relative-to-shape-size) (:x base-frame-size))
@@ -709,14 +717,21 @@
   (conj (or interactions []) interaction))
 
 (defn remove-interaction
+  "Interactions without the one at `index`; unchanged when `index` addresses none."
   [interactions index]
   (let [interactions (or interactions [])]
-    (into (subvec interactions 0 index)
-          (subvec interactions (inc index)))))
+    (if (and (int? index) (< -1 index (count interactions)))
+      (into (subvec interactions 0 index)
+            (subvec interactions (inc index)))
+      interactions)))
 
 (defn update-interaction
+  "Interactions with `update-fn` applied at `index`; unchanged when `index`
+  addresses none."
   [interactions index update-fn]
-  (update interactions index update-fn))
+  (if (and (int? index) (< -1 index (count interactions)))
+    (update interactions index update-fn)
+    interactions))
 
 (defn remap-interactions
   "Update all interactions whose destination points to a shape in the

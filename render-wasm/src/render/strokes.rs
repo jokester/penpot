@@ -1,13 +1,14 @@
 use crate::math::{Matrix, Point, Rect};
 
 use crate::shapes::{
-    merge_fills, Corners, Fill, ImageFill, Path, Shape, Stroke, StrokeCap, StrokeKind, SvgAttrs,
-    Type,
+    arrow_cap_path, merge_fills, square_cap_path, triangle_cap_path, Corners, Fill, ImageFill,
+    Path, Shape, Stroke, StrokeCap, StrokeKind, SvgAttrs, Type,
 };
 use skia_safe::{self as skia, ImageFilter, RRect};
 
 use super::{filters, RenderState, SurfaceId};
 use crate::error::{Error, Result};
+use crate::get_resources;
 use crate::render::filters::compose_filters;
 use crate::render::{get_dest_rect, get_source_rect};
 
@@ -29,6 +30,12 @@ pub(super) fn draw_stroke_on_rect(
     // Apply both blur and shadow filters if present, composing them if necessary.
     let filter = compose_filters(blur, shadow);
     paint.set_image_filter(filter);
+
+    // Per-side widths render as a band between an outer and an inner rect.
+    if let Some(widths) = stroke.per_side_widths() {
+        draw_per_side_stroke_on_rect(canvas, stroke, rect, corners, &paint, widths, antialias);
+        return;
+    }
 
     // By default just draw the rect. Only dotted inner/outer strokes need
     // clipping to prevent the dotted pattern from appearing in wrong areas.
@@ -94,6 +101,93 @@ pub(super) fn draw_stroke_on_rect(
     } else {
         draw_stroke();
     }
+}
+
+/// Draws a rect/frame stroke whose sides have different widths as the area
+/// between an outer and an inner (rounded) rect, mitered like CSS borders.
+/// The band is filled with the stroke fill; dashed/dotted patterns are not
+/// supported per side and render solid.
+#[allow(clippy::too_many_arguments)]
+fn draw_per_side_stroke_on_rect(
+    canvas: &skia::Canvas,
+    stroke: &Stroke,
+    rect: &Rect,
+    corners: &Option<Corners>,
+    paint: &skia::Paint,
+    widths: [f32; 4],
+    antialias: bool,
+) {
+    let [top, right, bottom, left] = widths;
+
+    // Fraction of each side width growing outward / inward from the shape
+    // boundary, per stroke alignment.
+    let (out_f, in_f) = match stroke.kind {
+        StrokeKind::Inner => (0.0, 1.0),
+        StrokeKind::Center => (0.5, 0.5),
+        StrokeKind::Outer => (1.0, 0.0),
+    };
+
+    let outer = Rect::from_ltrb(
+        rect.left - left * out_f,
+        rect.top - top * out_f,
+        rect.right + right * out_f,
+        rect.bottom + bottom * out_f,
+    );
+    let inner = Rect::from_ltrb(
+        rect.left + left * in_f,
+        rect.top + top * in_f,
+        rect.right - right * in_f,
+        rect.bottom - bottom * in_f,
+    );
+    // When a side width exceeds the shape dimension the inner rect collapses
+    // and the whole outer rect is filled, like CSS collapsing borders.
+    let has_hole = inner.width() > 0.0 && inner.height() > 0.0;
+
+    let mut fill_paint = paint.clone();
+    fill_paint.set_style(skia::PaintStyle::Fill);
+    fill_paint.set_path_effect(None);
+    fill_paint.set_anti_alias(antialias);
+
+    let mut pb = skia::PathBuilder::new();
+    match corners {
+        Some(radii) => {
+            // Straight (zero-radius) corners stay sharp; rounded ones keep
+            // their curvature parallel to the shape edge, like CSS borders.
+            let grow = |radius: f32, delta: f32| {
+                if radius > 0.0 {
+                    radius + delta
+                } else {
+                    0.0
+                }
+            };
+            let shrink = |radius: f32, delta: f32| (radius - delta).max(0.0);
+            // Adjacent side widths per corner, matching the Skia radii order:
+            // [top-left, top-right, bottom-right, bottom-left].
+            let side_deltas = [(left, top), (right, top), (right, bottom), (left, bottom)];
+            let mut outer_radii = *radii;
+            let mut inner_radii = *radii;
+            for (i, (dx, dy)) in side_deltas.into_iter().enumerate() {
+                outer_radii[i].x = grow(outer_radii[i].x, dx * out_f);
+                outer_radii[i].y = grow(outer_radii[i].y, dy * out_f);
+                inner_radii[i].x = shrink(inner_radii[i].x, dx * in_f);
+                inner_radii[i].y = shrink(inner_radii[i].y, dy * in_f);
+            }
+            pb.add_rrect(RRect::new_rect_radii(outer, &outer_radii), None, None);
+            if has_hole {
+                pb.add_rrect(RRect::new_rect_radii(inner, &inner_radii), None, None);
+            }
+        }
+        None => {
+            pb.add_rect(outer, None, None);
+            if has_hole {
+                pb.add_rect(inner, None, None);
+            }
+        }
+    }
+
+    let mut path = pb.detach();
+    path.set_fill_type(skia::PathFillType::EvenOdd);
+    canvas.draw_path(&path, &fill_paint);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -315,6 +409,8 @@ pub(super) fn handle_stroke_caps(
     if let [first_point, .., last_point] = points.as_slice() {
         let mut paint_stroke = paint.clone();
 
+        paint_stroke.set_path_effect(None);
+
         if let Some(filter) = blur {
             paint_stroke.set_image_filter(filter.clone());
         }
@@ -351,40 +447,10 @@ fn draw_square_cap(
     size: f32,
     extra_rotation: f32,
 ) {
-    let dx = direction.x - center.x;
-    let dy = direction.y - center.y;
-    let angle = dy.atan2(dx);
-
-    let mut matrix = Matrix::new_identity();
-    matrix.pre_rotate(
-        angle.to_degrees() + extra_rotation,
-        Point::new(center.x, center.y),
+    canvas.draw_path(
+        &square_cap_path(center, direction, size, extra_rotation),
+        paint,
     );
-
-    let half_size = size / 2.0;
-    let rect = Rect::from_xywh(center.x - half_size, center.y - half_size, size, size);
-
-    let points = [
-        Point::new(rect.left(), rect.top()),
-        Point::new(rect.right(), rect.top()),
-        Point::new(rect.right(), rect.bottom()),
-        Point::new(rect.left(), rect.bottom()),
-    ];
-
-    let mut transformed_points = points;
-    matrix.map_points(&mut transformed_points, &points);
-
-    let path = {
-        let mut pb = skia::PathBuilder::new();
-        pb.move_to(Point::new(center.x, center.y));
-        pb.move_to(transformed_points[0]);
-        pb.line_to(transformed_points[1]);
-        pb.line_to(transformed_points[2]);
-        pb.line_to(transformed_points[3]);
-        pb.close();
-        pb.detach()
-    };
-    canvas.draw_path(&path, paint);
 }
 
 fn draw_arrow_cap(
@@ -394,33 +460,7 @@ fn draw_arrow_cap(
     direction: &Point,
     size: f32,
 ) {
-    let dx = direction.x - center.x;
-    let dy = direction.y - center.y;
-    let angle = dy.atan2(dx);
-
-    let mut matrix = Matrix::new_identity();
-    matrix.pre_rotate(angle.to_degrees() - 90., Point::new(center.x, center.y));
-
-    let half_height = size / 2.;
-    let points = [
-        Point::new(center.x, center.y - half_height),
-        Point::new(center.x - size, center.y + half_height),
-        Point::new(center.x + size, center.y + half_height),
-    ];
-
-    let mut transformed_points = points;
-    matrix.map_points(&mut transformed_points, &points);
-
-    let path = {
-        let mut pb = skia::PathBuilder::new();
-        pb.move_to(transformed_points[1]);
-        pb.line_to(transformed_points[0]);
-        pb.line_to(transformed_points[2]);
-        pb.move_to(Point::new(center.x, center.y));
-        pb.line_to(transformed_points[0]);
-        pb.detach()
-    };
-    canvas.draw_path(&path, paint);
+    canvas.draw_path(&arrow_cap_path(center, direction, size), paint);
 }
 
 fn draw_triangle_cap(
@@ -430,32 +470,7 @@ fn draw_triangle_cap(
     direction: &Point,
     size: f32,
 ) {
-    let dx = direction.x - center.x;
-    let dy = direction.y - center.y;
-    let angle = dy.atan2(dx);
-
-    let mut matrix = Matrix::new_identity();
-    matrix.pre_rotate(angle.to_degrees() - 90., Point::new(center.x, center.y));
-
-    let half_height = size / 2.;
-    let points = [
-        Point::new(center.x, center.y - half_height),
-        Point::new(center.x - size, center.y + half_height),
-        Point::new(center.x + size, center.y + half_height),
-    ];
-
-    let mut transformed_points = points;
-    matrix.map_points(&mut transformed_points, &points);
-
-    let path = {
-        let mut pb = skia::PathBuilder::new();
-        pb.move_to(transformed_points[0]);
-        pb.line_to(transformed_points[1]);
-        pb.line_to(transformed_points[2]);
-        pb.close();
-        pb.detach()
-    };
-    canvas.draw_path(&path, paint);
+    canvas.draw_path(&triangle_cap_path(center, direction, size), paint);
 }
 
 fn draw_image_stroke_in_container(
@@ -467,7 +482,14 @@ fn draw_image_stroke_in_container(
     surface_id: SurfaceId,
 ) -> Result<()> {
     let scale = render_state.get_scale();
-    let Some(image) = render_state.images.get(&image_fill.id()) else {
+    let lod_stroke;
+    let stroke = if matches!(shape.shape_type, Type::Path(_) | Type::Bool(_)) {
+        lod_stroke = stroke.path_lod_at_scale(shape.is_open(), scale);
+        &lod_stroke
+    } else {
+        stroke
+    };
+    let Some(image) = get_resources().images.get(&image_fill.id()) else {
         return Ok(());
     };
 
@@ -575,7 +597,7 @@ fn draw_image_stroke_in_container(
         image,
         Some((&src_rect, skia::canvas::SrcRectConstraint::Strict)),
         dest_rect,
-        render_state.sampling_options,
+        get_resources().sampling_options,
         &image_paint,
     );
 
@@ -710,6 +732,7 @@ fn strokes_share_geometry(strokes: &[&Stroke]) -> bool {
     strokes.windows(2).all(|pair| {
         pair[0].kind == pair[1].kind
             && pair[0].width == pair[1].width
+            && pair[0].widths == pair[1].widths
             && pair[0].style == pair[1].style
             && pair[0].cap_start == pair[1].cap_start
             && pair[0].cap_end == pair[1].cap_end
@@ -843,12 +866,13 @@ fn render_merged(
         shape_type @ (Type::Path(_) | Type::Bool(_)) => {
             if let Some(path) = shape_type.path() {
                 let is_open = path.is_open();
+                let lod_stroke = representative.path_lod_at_scale(is_open, scale);
                 let mut paint =
-                    representative.to_stroked_paint(is_open, &selrect, svg_attrs, antialias);
+                    lod_stroke.to_stroked_paint(is_open, &selrect, svg_attrs, antialias);
                 paint.set_shader(merged.shader());
                 draw_stroke_on_path(
                     canvas,
-                    representative,
+                    &lod_stroke,
                     path,
                     &paint,
                     path_transform.as_ref(),
@@ -1002,6 +1026,8 @@ fn render_single_internal(
             shape_type @ (Type::Path(_) | Type::Bool(_)) => {
                 if let Some(path) = shape_type.path() {
                     let is_open = path.is_open();
+                    let lod_stroke = stroke.path_lod_at_scale(is_open, scale);
+                    let stroke = &lod_stroke;
                     let mut paint =
                         stroke.to_stroked_paint(is_open, &selrect, svg_attrs, antialias);
                     // Apply outset by increasing stroke width

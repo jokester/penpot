@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 //
-// Copyright (c) KALEIDOS INC Sucursal en España SL
+// Copyright (c) KALEIDOS SUBSIDIARY SL
 
 @use "refactor/common-refactor.scss" as deprecated;
 @use "ds/typography.scss" as t;
@@ -99,6 +99,22 @@
 .modal-start svg {
   inline-size: 100%;
   block-size: auto;
+}
+
+.welcome-illustration-light {
+  display: none;
+
+  :global(.light) & {
+    display: block;
+  }
+}
+
+.welcome-illustration-dark {
+  display: block;
+
+  :global(.light) & {
+    display: none;
+  }
 }
 
 .radio-btns {

@@ -1,20 +1,20 @@
 use skia_safe::{self as skia, textlayout::FontCollection, Path, Point};
 use std::collections::HashMap;
 
-mod rulers;
 mod shapes_pool;
 mod text_editor;
 mod ui;
-pub use rulers::RulerState;
 pub use shapes_pool::{ShapesPool, ShapesPoolMutRef, ShapesPoolRef};
 pub use text_editor::*;
+pub use ui::RulerState;
 pub use ui::UIState;
 
 use crate::error::{Error, Result};
+use crate::render::raster::RasterFormat;
 use crate::render::FrameType;
-use crate::shapes::{grid_layout::grid_cell_data, Shape};
+use crate::shapes::{grid_layout::grid_cell_data, FontFamily, Shape};
 use crate::uuid::Uuid;
-use crate::{get_render_state, tiles};
+use crate::{get_render_state, get_resources, has_render_state, tiles};
 
 /// This struct holds the state of the Rust application between JS calls.
 ///
@@ -69,6 +69,10 @@ impl State {
         get_render_state().render_from_cache(&self.shapes);
     }
 
+    pub fn present_frame(&mut self) {
+        get_render_state().present_frame(&self.shapes);
+    }
+
     pub fn render_ui_only(&mut self) {
         get_render_state().render_ui_only(&self.shapes);
     }
@@ -92,12 +96,48 @@ impl State {
         id: &Uuid,
         scale: f32,
         timestamp: i32,
+        format: RasterFormat,
     ) -> Result<(Vec<u8>, i32, i32)> {
-        get_render_state().render_shape_pixels(id, &self.shapes, scale, timestamp)
+        get_render_state().render_shape_pixels(id, &self.shapes, scale, timestamp, format)
     }
 
     pub fn render_shape_pdf(&mut self, id: &Uuid, scale: f32) -> Result<Vec<u8>> {
-        crate::render::pdf::render_to_pdf(get_render_state(), id, &self.shapes, scale)
+        crate::render::pdf::render_to_pdf(get_resources(), id, &self.shapes, scale)
+    }
+
+    pub fn render_shape_svg(&mut self, id: &Uuid, scale: f32) -> Result<Vec<u8>> {
+        crate::render::svg::render_to_svg(get_resources(), id, &self.shapes, scale)
+    }
+
+    /// GPU-free counterpart of [`State::render_shape_pixels`]: encodes to
+    /// `format` on a CPU raster surface, no GPU/WebGL.
+    pub fn render_shape_raster(
+        &mut self,
+        id: &Uuid,
+        scale: f32,
+        format: RasterFormat,
+    ) -> Result<(Vec<u8>, i32, i32)> {
+        crate::render::raster::render_to_raster(get_resources(), id, &self.shapes, scale, format)
+    }
+
+    /// Distinct font families used by the (visible) subtree rooted at `id`, in
+    /// first-seen order — the on-demand set the headless exporter provisions.
+    pub fn fonts_used_by_shape(&self, id: &Uuid) -> Vec<FontFamily> {
+        let Some(root) = self.shapes.get(id) else {
+            return Vec::new();
+        };
+
+        let mut result: Vec<FontFamily> = Vec::new();
+        for child_id in root.all_children_iter(&self.shapes, false, true) {
+            if let Some(shape) = self.shapes.get(&child_id) {
+                for family in shape.font_families() {
+                    if !result.contains(&family) {
+                        result.push(family);
+                    }
+                }
+            }
+        }
+        result
     }
 
     pub fn start_render_loop(&mut self, timestamp: i32) -> Result<FrameType> {
@@ -151,8 +191,6 @@ impl State {
     }
 
     pub fn delete_shape_children(&mut self, parent_id: Uuid, id: Uuid) {
-        let render_state = get_render_state();
-
         // We don't really do a self.shapes.remove so that redo/undo keep working
         let Some(shape) = self.shapes.get(&id) else {
             return;
@@ -160,23 +198,30 @@ impl State {
 
         // Only remove the children when is being deleted from the owner
         if shape.parent_id.is_none() || shape.parent_id == Some(parent_id) {
-            // IMPORTANT:
-            // Do NOT use `get_tiles_for_shape` here. That method intersects the shape
-            // tiles with the current interest area, which means we'd only invalidate
-            // the subset currently near the viewport. When the user later pans/zooms
-            // to reveal previously cached tiles, stale pixels could reappear.
-            //
-            // Instead, remove the shape from *all* tiles where it was indexed, and
-            // drop cached tiles for those entries.
-            let indexed_tiles: Vec<tiles::Tile> = render_state
-                .tiles
-                .get_tiles_of(shape.id)
-                .map(|t| t.iter().copied().collect())
-                .unwrap_or_default();
-
-            for tile in indexed_tiles {
-                render_state.remove_cached_tile(tile);
-                render_state.tiles.remove_shape_at(tile, shape.id);
+            // Tile invalidation only applies to the on-screen render state; the
+            // headless export path has none, so skip it there.
+            if has_render_state() {
+                let render_state = get_render_state();
+                // Do NOT use `get_tiles_for_shape` (interest-clipped). Evict by
+                // document coverage so cached tiles outside the interest area
+                // cannot keep pixels of the deleted shape.
+                let indexed_tiles: Vec<tiles::Tile> = render_state
+                    .tiles
+                    .get_tiles_of(shape.id)
+                    .map(|t| t.iter().copied().collect())
+                    .unwrap_or_default();
+                let scale = render_state.get_scale();
+                let dirty = indexed_tiles
+                    .iter()
+                    .fold(shape.extrect(&self.shapes, 1.0), |acc, tile| {
+                        tiles::join_nonempty(acc, tiles::get_tile_rect(*tile, scale))
+                    });
+                render_state
+                    .surfaces
+                    .invalidate_cached_tiles_intersecting(dirty);
+                for tile in indexed_tiles {
+                    render_state.tiles.remove_shape_at(tile, shape.id);
+                }
             }
 
             if let Some(shape_to_delete) = self.shapes.get(&id) {
@@ -185,8 +230,8 @@ impl State {
                     if let Some(shape_to_delete) = self.shapes.get_mut(&shape_id) {
                         shape_to_delete.set_deleted(true);
                     }
-                    if render_state.show_grid == Some(shape_id) {
-                        render_state.show_grid = None;
+                    if has_render_state() && get_render_state().show_grid == Some(shape_id) {
+                        get_render_state().show_grid = None;
                     }
                 }
             }
@@ -216,7 +261,8 @@ impl State {
     /// and groups properly encompass their children.
     pub fn set_parent_for_current_shape(&mut self, id: Uuid) {
         // Reparent preview during drag is handled by structure modifiers only.
-        if get_render_state().options.is_interactive_transform() {
+        // Headless export has no render state and never runs interactive drags.
+        if has_render_state() && get_render_state().options.is_interactive_transform() {
             return;
         }
 
@@ -266,7 +312,7 @@ impl State {
     }
 
     pub fn font_collection(&self) -> &FontCollection {
-        get_render_state().fonts().font_collection()
+        get_resources().fonts.font_collection()
     }
 
     pub fn get_grid_coords(&self, pos_x: f32, pos_y: f32) -> Option<(i32, i32)> {
@@ -298,19 +344,51 @@ impl State {
         self.shapes.set_modifiers(modifiers);
     }
 
-    pub fn touch_current(&mut self) {
-        let render_state = get_render_state();
-        if !self.loading {
-            if let Some(current_id) = self.current_id {
-                render_state.mark_touched(current_id);
+    /// Replace the current shape's children list (same semantics as `_set_children`).
+    pub fn set_current_shape_children(&mut self, entries: Vec<Uuid>) -> Result<()> {
+        let (parent_id, deleted) = {
+            let Some(shape) = self.current_shape_mut() else {
+                return Err(Error::RecoverableError(
+                    "set_current_shape_children: no current shape".to_string(),
+                ));
+            };
+
+            let id = shape.id;
+            let (_, deleted) = shape.compute_children_differences(&entries);
+            shape.children = entries.clone();
+            (id, deleted)
+        };
+
+        for id in &entries {
+            self.touch_shape(*id);
+            if let Some(children_shape) = self.shapes.get_mut(id) {
+                children_shape.set_deleted(false);
             }
+        }
+
+        for id in deleted {
+            self.delete_shape_children(parent_id, id);
+            self.touch_shape(id);
+        }
+
+        Ok(())
+    }
+
+    pub fn touch_current(&mut self) {
+        if let Some(current_id) = self.current_id {
+            self.touch_shape(current_id);
         }
     }
 
     pub fn touch_shape(&mut self, id: Uuid) {
-        let render_state = get_render_state();
-        if !self.loading {
-            render_state.mark_touched(id);
+        self.shapes.invalidate_ancestors_extrect(&id);
+        if self.loading || !has_render_state() {
+            return;
         }
+        let prev = self
+            .shapes
+            .get(&id)
+            .map(|shape| shape.extrect(&self.shapes, 1.0));
+        get_render_state().mark_touched_with_prev(id, prev);
     }
 }

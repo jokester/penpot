@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns backend-tests.helpers
   (:require
@@ -79,59 +79,66 @@
    :enable-auto-file-snapshot
    :disable-file-validation])
 
-(defn state-init
+(defn init-config
+  ([next]
+   (init-config nil next))
+  ([extra-flags next]
+   (let [flags (into default-flags extra-flags)]
+     (with-redefs [app.config/flags (flags/parse flags/default flags)
+                   app.config/config config
+                   app.loggers.audit/submit (constantly nil)
+                   app.auth/derive-password identity
+                   app.auth/verify-password (fn [a b] {:valid (= a b)})
+                   app.common.features/get-enabled-features
+                   (fn [& _] app.common.features/supported-features)]
+       (cf/validate! :exit-on-error? false)
+       (fs/create-dir "/tmp/penpot")
+       (next)))))
+
+(defn init-system
   [next]
-  (with-redefs [app.config/flags (flags/parse flags/default default-flags)
-                app.config/config config
-                app.loggers.audit/submit (constantly nil)
-                app.auth/derive-password identity
-                app.auth/verify-password (fn [a b] {:valid (= a b)})
-                app.common.features/get-enabled-features (fn [& _] app.common.features/supported-features)]
+  (let [templates [{:id "test"
+                    :name "test"
+                    :file-uri "test"
+                    :thumbnail-uri "test"
+                    :path (-> "backend_tests/test_files/template.penpot" io/resource fs/path)}]
+        system (-> (merge main/system-config main/worker-config)
+                   (assoc-in [:app.redis/client :app.redis/uri] (:redis-uri config))
+                   (assoc-in [::db/pool ::db/uri] (:database-uri config))
+                   (assoc-in [::db/pool ::db/username] (:database-username config))
+                   (assoc-in [::db/pool ::db/password] (:database-password config))
+                   (assoc-in [:app.rpc/methods :app.setup/templates] templates)
+                   (assoc-in [:app.rpc/methods :app.setup/templates] templates)
+                   (update :app.rpc/rlimit assoc
+                           :app.loggers.mattermost/reporter nil
+                           :app.loggers.database/reporter nil)
+                   (update :app.rpc/methods assoc
+                           :app.setup/templates templates
+                           :app.loggers.mattermost/reporter nil
+                           :app.loggers.database/reporter nil)
+                   (dissoc :app.srepl/server
+                           :app.http/server
+                           :app.http/route
+                           :app.setup/templates
+                           :app.http.oauth/handler
+                           :app.notifications/handler
+                           :app.loggers.mattermost/reporter
+                           :app.loggers.database/reporter
+                           :app.worker/cron
+                           :app.worker/dispatcher
+                           [:app.main/default :app.worker/runner]
+                           [:app.main/webhook :app.worker/runner]))
+        _      (ig/load-namespaces system)
+        system (-> (ig/expand system) (ig/init))]
+    (try
+      (binding [*system* system
+                *pool*   (:app.db/pool system)]
+        (next))
+      (finally
+        (ig/halt! system)))))
 
-    (cf/validate! :exit-on-error? false)
-
-    (fs/create-dir "/tmp/penpot")
-
-    (let [templates [{:id "test"
-                      :name "test"
-                      :file-uri "test"
-                      :thumbnail-uri "test"
-                      :path (-> "backend_tests/test_files/template.penpot" io/resource fs/path)}]
-          system (-> (merge main/system-config main/worker-config)
-                     (assoc-in [:app.redis/client :app.redis/uri] (:redis-uri config))
-                     (assoc-in [::db/pool ::db/uri] (:database-uri config))
-                     (assoc-in [::db/pool ::db/username] (:database-username config))
-                     (assoc-in [::db/pool ::db/password] (:database-password config))
-                     (assoc-in [:app.rpc/methods :app.setup/templates] templates)
-                     (assoc-in [:app.rpc/methods :app.setup/templates] templates)
-                     (update :app.rpc/rlimit assoc
-                             :app.loggers.mattermost/reporter nil
-                             :app.loggers.database/reporter nil)
-                     (update :app.rpc/methods assoc
-                             :app.setup/templates templates
-                             :app.loggers.mattermost/reporter nil
-                             :app.loggers.database/reporter nil)
-                     (dissoc :app.srepl/server
-                             :app.http/server
-                             :app.http/route
-                             :app.setup/templates
-                             :app.http.oauth/handler
-                             :app.notifications/handler
-                             :app.loggers.mattermost/reporter
-                             :app.loggers.database/reporter
-                             :app.worker/cron
-                             :app.worker/dispatcher
-                             [:app.main/default :app.worker/runner]
-                             [:app.main/webhook :app.worker/runner]))
-          _      (ig/load-namespaces system)
-          system (-> (ig/expand system)
-                     (ig/init))]
-      (try
-        (binding [*system* system
-                  *pool*   (:app.db/pool system)]
-          (next))
-        (finally
-          (ig/halt! system))))))
+(def state-init
+  (t/compose-fixtures init-config init-system))
 
 (defn database-reset
   [next]
@@ -182,7 +189,7 @@
    (let [params (merge {:id (mk-uuid "profile" i)
                         :fullname (str "Profile " i)
                         :email (str "profile" i ".test@nodomain.com")
-                        :password "123123"
+                        :password "Test123!"
                         :is-demo false}
                        params)]
      (db/run! system
@@ -386,29 +393,15 @@
                             (assoc :app.rpc/request-at (ct/now)))))))
 
 (defn management-command!
-  ([data]
-   (management-command! data nil))
-  ([{:keys [::type] :as data} flags-to-add]
-   (let [flags (reduce conj cf/flags (or flags-to-add []))
-
-         resolve-management-methods
-         (requiring-resolve 'app.rpc/resolve-management-methods)
-
-         methods
-         (with-redefs [cf/flags flags]
-           (resolve-management-methods *system*))
-
-         [_ method-fn]
-         (get methods type)]
-
-     (when-not method-fn
-       (ex/raise :type :assertion
-                 :code :rpc-method-not-found
-                 :hint (str/ffmt "management rpc method '%' not found" (name type))))
-
-     (try-on! (method-fn (-> data
-                             (dissoc ::type)
-                             (assoc :app.rpc/request-at (ct/now))))))))
+  [{:keys [::type] :as data}]
+  (let [[_ method-fn] (get-in *system* [:app.rpc/management-methods type])]
+    (when-not method-fn
+      (ex/raise :type :assertion
+                :code :rpc-method-not-found
+                :hint (str/ffmt "management rpc method '%' not found" (name type))))
+    (try-on! (method-fn (-> data
+                            (dissoc ::type)
+                            (assoc :app.rpc/request-at (ct/now)))))))
 
 (defn run-task!
   ([name]
@@ -634,3 +627,66 @@
             (parse-sse (slurp' input)))
       (finally
         (.close input)))))
+
+;; ---- Dummy Request Helpers
+
+(defrecord DummyRequest [headers cookies method body-stream
+                         remote-addr server-name server-port
+                         scheme protocol path query ssl-client-cert]
+  yrq/IRequestCookies
+  (get-cookie [_ name]
+    {:value (get cookies name)})
+
+  yrq/IRequest
+  (get-header [_ name]
+    (get headers name))
+  (method [_] method)
+  (body [_] body-stream)
+  (path [_] path)
+  (query [_] query)
+  (server-port [_] server-port)
+  (server-name [_] server-name)
+  (remote-addr [_] remote-addr)
+  (ssl-client-cert [_] ssl-client-cert)
+  (scheme [_] scheme)
+  (protocol [_] protocol))
+
+(defn make-dummy-request
+  "Constructs a DummyRequest from an options map. Every key is
+  optional; missing values fall back to sensible defaults. New
+  fields added to DummyRequest won't break existing call sites
+  as long as this constructor keeps its `:or` defaults in sync.
+
+  Recognized keys:
+    :headers         — map of header name → value
+    :cookies         — map of cookie name → value
+    :method          — HTTP method keyword (default :get)
+    :body-stream     — InputStream for the body (used directly)
+    :body-bytes      — bytes or string for the body; wrapped in a
+                       ByteArrayInputStream if :body-stream is not
+                       given
+    :remote-addr     — string (default \"127.0.0.1\")
+    :server-name     — string (default \"test\")
+    :server-port     — long   (default 0)
+    :scheme          — keyword (default :http)
+    :protocol        — string (default \"HTTP/1.1\")
+    :path            — string (default \"/test\")
+    :query           — string or nil (default nil)
+    :ssl-client-cert — X509Certificate or nil (default nil)"
+  [{:keys [headers cookies method body-stream body-bytes
+           remote-addr server-name server-port scheme protocol
+           path query ssl-client-cert]
+    :or   {headers {} cookies {} method :get
+           body-stream nil
+           remote-addr "127.0.0.1" server-name "test" server-port 0
+           scheme :http protocol "HTTP/1.1" path "/test" query nil
+           ssl-client-cert nil}}]
+  (let [body-stream (or body-stream
+                        (when body-bytes
+                          (java.io.ByteArrayInputStream.
+                           (if (string? body-bytes)
+                             (.getBytes ^String body-bytes "UTF-8")
+                             body-bytes))))]
+    (->DummyRequest headers cookies method body-stream
+                    remote-addr server-name server-port
+                    scheme protocol path query ssl-client-cert)))

@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns backend-tests.rpc-viewer-test
   (:require
@@ -128,3 +128,128 @@
         (let [result (:result out)]
           (t/is (contains? result :file))
           (t/is (contains? result :project)))))))
+
+(t/deftest share-link-token-disclosure
+  (let [owner  (th/create-profile* 1 {:is-active true})
+        proj-id (:default-project-id owner)
+
+        file   (th/create-file* 1 {:profile-id (:id owner)
+                                   :project-id proj-id
+                                   :is-shared false})
+
+        page-a (get-in file [:data :pages 0])
+        page-b (uuid/random)
+
+        ;; Add a second page to the file
+        _      (th/command! {::th/type :update-file
+                             ::rpc/profile-id (:id owner)
+                             :id (:id file)
+                             :session-id (uuid/random)
+                             :revn 0
+                             :vern 0
+                             :changes [{:type :add-page
+                                        :id page-b
+                                        :page {:id page-b
+                                               :name "Page B"
+                                               :options {}
+                                               :objects {}}}]})
+
+        ;; Create Link A: restrictive (no pages, team-only comments/inspect)
+        link-a (th/command! {::th/type :create-share-link
+                             ::rpc/profile-id (:id owner)
+                             :file-id (:id file)
+                             :pages #{}
+                             :who-comment "team"
+                             :who-inspect "team"})
+        link-a-id (get-in link-a [:result :id])
+
+        ;; Create Link B: permissive (all pages, all can comment/inspect)
+        link-b (th/command! {::th/type :create-share-link
+                             ::rpc/profile-id (:id owner)
+                             :file-id (:id file)
+                             :pages #{page-a page-b}
+                             :who-comment "all"
+                             :who-inspect "all"})
+        link-b-id (get-in link-b [:result :id])]
+
+    (t/testing "restrictive share-link holder cannot see other share-link tokens"
+      (let [out (th/command! {::th/type :get-view-only-bundle
+                              :share-id link-a-id
+                              :file-id (:id file)})
+            err (:error out)
+            result (:result out)
+            share-links (:share-links result)]
+
+        ;; Should not error
+        (t/is (nil? err))
+
+        ;; Should only see the share-link used for authentication
+        (t/is (= 1 (count share-links)))
+        (t/is (= link-a-id (:id (first share-links))))
+
+        ;; Should NOT see Link B's token
+        (t/is (not (some #(= link-b-id (:id %)) share-links)))))
+
+    (t/testing "team member still sees all share-links"
+      (let [out (th/command! {::th/type :get-view-only-bundle
+                              ::rpc/profile-id (:id owner)
+                              :file-id (:id file)})
+            err (:error out)
+            result (:result out)
+            share-links (:share-links result)]
+
+        ;; Should not error
+        (t/is (nil? err))
+
+        ;; Team member should see both share-links
+        (t/is (= 2 (count share-links)))
+        (t/is (some #(= link-a-id (:id %)) share-links))
+        (t/is (some #(= link-b-id (:id %)) share-links))))
+
+    (t/testing "share-link viewer does not query sibling share-links"
+      ;; Direct regression test for the predicate-pushdown invariant:
+      ;; on the share-link path the bundle must resolve the caller's
+      ;; row with a composite (id, file-id) single-row lookup and must
+      ;; never run the full {:file-id} query that would load sibling
+      ;; tokens into the backend process. The with-redefs spies only
+      ;; record and delegate, following the instrumentation style used
+      ;; elsewhere in this suite (e.g. auth-ldap-test).
+      (let [share-queries (atom [])
+            share-gets    (atom [])
+            orig-query    @#'db/query
+            orig-get*     @#'db/get*]
+        (with-redefs [db/query (fn [conn table params & opts]
+                                 (when (= :share-link table)
+                                   (swap! share-queries conj params))
+                                 (apply orig-query conn table params opts))
+                      db/get*  (fn [conn table params & opts]
+                                 (when (= :share-link table)
+                                   (swap! share-gets conj params))
+                                 (apply orig-get* conn table params opts))]
+          (let [out    (th/command! {::th/type :get-view-only-bundle
+                                     :share-id link-a-id
+                                     :file-id (:id file)})
+                result (:result out)]
+            (t/is (nil? (:error out)))
+            (t/is (= 1 (count (:share-links result))))
+            (t/is (= link-a-id (:id (first (:share-links result)))))
+            ;; No full-file sibling query ran on this path.
+            (t/is (empty? @share-queries))
+            ;; Only composite single-row lookups ran (the permission
+            ;; check plus the bundle itself, same predicate in both).
+            (t/is (seq @share-gets))
+            (t/is (every? #(= {:id link-a-id :file-id (:id file)} %)
+                          @share-gets))))))
+
+    (t/testing "cross-file share-id replay fails closed"
+      (let [other-file (th/create-file* 2 {:profile-id (:id owner)
+                                           :project-id proj-id
+                                           :is-shared false})
+            out (th/command! {::th/type :get-view-only-bundle
+                              :share-id link-a-id
+                              :file-id (:id other-file)})
+            error (:error out)
+            error-data (ex-data error)]
+        (t/is (th/ex-info? error))
+        (t/is (= :not-found (:type error-data)))
+        (t/is (= :object-not-found (:code error-data)))))))

@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.rpc.notifications
   (:require
@@ -16,17 +16,17 @@
                ;;TODO There is a bug on dashboard with teams notifications.
                ;;For now we send it to uuid/zero instead of team-id
                :topic uuid/zero
-               :message {:type :team-org-change
+               :message {:type :team-organization-change
                          :team team
                          :notification notification})))
 
 
-(defn notify-user-org-change
+(defn notify-user-organization-change
   [cfg profile-id organization-id organization-name notification]
   (let [msgbus (::mbus/msgbus cfg)]
     (mbus/pub! msgbus
                :topic profile-id
-               :message {:type :user-org-change
+               :message {:type :user-organization-change
                          :topic profile-id
                          :organization-id organization-id
                          :organization-name organization-name

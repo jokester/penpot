@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.workspace.sidebar.options.rows.color-row
   (:require-macros [app.main.style :as stl])
@@ -17,7 +17,7 @@
    [app.main.refs :as refs]
    [app.main.store :as st]
    [app.main.ui.components.color-input :refer [color-input*]]
-   [app.main.ui.components.numeric-input :refer [numeric-input*]]
+   [app.main.ui.components.numeric-input :as deprecated-input]
    [app.main.ui.components.reorder-handler :refer [reorder-handler*]]
    [app.main.ui.context :as ctx]
    [app.main.ui.ds.buttons.icon-button :refer [icon-button*]]
@@ -54,17 +54,17 @@
    (when opacity
      [:div {:class (stl/css :opacity-element-wrapper)}
       [:span {:class (stl/css :icon-text)} "%"]
-      [:> numeric-input* {:value (-> color :opacity opacity->string)
-                          :class (stl/css :opacity-input)
-                          :placeholder "--"
-                          :select-on-focus select-on-focus
-                          :on-focus on-focus
-                          :on-blur on-blur
-                          :on-change on-opacity-change
-                          :data-testid "opacity-input"
-                          :default 100
-                          :min 0
-                          :max 100}]])])
+      [:> deprecated-input/numeric-input* {:value (-> color :opacity opacity->string)
+                                           :class (stl/css :opacity-input)
+                                           :placeholder "--"
+                                           :select-on-focus select-on-focus
+                                           :on-focus on-focus
+                                           :on-blur on-blur
+                                           :on-change on-opacity-change
+                                           :data-testid "opacity-input"
+                                           :default 100
+                                           :min 0
+                                           :max 100}]])])
 
 (mf/defc color-token-row*
   {::mf/private true}

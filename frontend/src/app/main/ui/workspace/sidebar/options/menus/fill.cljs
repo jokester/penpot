@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.workspace.sidebar.options.menus.fill
   (:require-macros [app.main.style :as stl])
@@ -84,8 +84,10 @@
         empty-fills?   (and (not multiple?)
                             (= 0 (count fills)))
 
-        open*          (mf/use-state has-fills?)
-        open?          (deref open*)
+        ;; Derive the open state from `has-fills?` on every render so it stays
+        ;; in sync even when the fills arrive after mount (editor v3)
+        open*          (mf/use-state true)
+        open?          (and has-fills? (deref open*))
 
         toggle-content (mf/use-fn #(swap! open* not))
         open-content   (mf/use-fn #(reset! open* true))

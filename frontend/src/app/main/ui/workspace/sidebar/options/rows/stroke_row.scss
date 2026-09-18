@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 //
-// Copyright (c) KALEIDOS INC Sucursal en España SL
+// Copyright (c) KALEIDOS SUBSIDIARY SL
 
 @use "ds/typography.scss" as t;
 @use "refactor/common-refactor.scss" as deprecated;
@@ -97,4 +97,25 @@
 
 .stroke-style-icon-select {
   --dropdown-width: var(--four-columns-width);
+}
+
+.stroke-options-tokens-with-toggle {
+  grid-template-columns: 1.5fr 1fr 1fr auto;
+}
+
+.stroke-style-select-compact {
+  grid-column: span 2;
+}
+
+.stroke-sides-options {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--sp-xs) var(--sp-xs);
+}
+
+.stroke-side-input {
+  @extend %input-element;
+  @include t.use-typography("body-small");
+
+  padding-inline-start: var(--sp-xs);
 }

@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.workspace.sidebar.layer-name
   (:require-macros [app.main.style :as stl])
@@ -26,7 +26,11 @@
            type-comp type-frame component-id is-hidden is-blocked
            variant-id variant-name variant-properties variant-error
            on-tab-press ref]}]
-  (let [edition*         (mf/use-state false)
+  (let [;; Subscribe to dbg/state so the component re-renders when
+        ;; debug options are toggled without a page reload.
+        _dbg             (mf/deref dbg/state)
+
+        edition*         (mf/use-state false)
         edition?         (deref edition*)
 
         local-ref        (mf/use-ref)

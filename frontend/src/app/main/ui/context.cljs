@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.context
   (:require
@@ -32,6 +32,8 @@
 (def workspace-read-only? (mf/create-context nil))
 (def is-render?           (mf/create-context false))
 (def is-component?        (mf/create-context false))
+
+(def shortcuts-ctx (mf/create-context nil))
 
 (def sidebar
   "A context that intends to store the current sidebar position,

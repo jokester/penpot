@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 //
-// Copyright (c) KALEIDOS INC Sucursal en España SL
+// Copyright (c) KALEIDOS SUBSIDIARY SL
 
 @use "refactor/common-refactor.scss" as deprecated;
 @use "./grid.scss" as g;
@@ -49,8 +49,8 @@
     cursor: pointer;
     margin: deprecated.$s-8;
     border: deprecated.$s-2 solid transparent;
-    width: var(--th-width, #{g.$thumbnail-default-width});
-    height: var(--th-height, #{g.$thumbnail-default-height});
+    width: var(--thumbnail-width, #{g.$thumbnail-default-width});
+    height: var(--thumbnail-height, #{g.$thumbnail-default-height});
 
     svg {
       width: deprecated.$s-32;
@@ -99,7 +99,8 @@
 }
 
 .empty-placeholder-libraries {
-  margin: deprecated.$s-16;
+  margin: auto;
+  margin-top: 5%;
 }
 
 .empty-project-container {

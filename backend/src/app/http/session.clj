@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.http.session
   (:refer-clojure :exclude [read])
@@ -35,6 +35,9 @@
 
 ;; Default age for automatic session renewal
 (def default-renewal-max-age (ct/duration {:hours 6}))
+
+;; Default absolute maximum session duration
+(def default-cookie-max-age-absolute (ct/duration {:days 30}))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; PROTOCOLS
@@ -169,15 +172,19 @@
 
 (defn- assign-token
   [cfg session]
-  (let [claims {:iss "authentication"
-                :aud "penpot"
-                :sid (:id session)
-                :iat (:modified-at session)
-                :uid (:profile-id session)
-                :sso-provider-id (:sso-provider-id session)
-                :sso-session-id (:sso-session-id session)}
-        header {:kid 1 :ver 1}
-        token  (tokens/generate cfg claims header)]
+  (let [absolute-max-age (cf/get :auth-token-cookie-max-age-absolute default-cookie-max-age-absolute)
+        claims            {:iss "authentication"
+                           :aud "penpot"
+                           :sid (:id session)
+                           :iat (:modified-at session)
+                           :uid (:profile-id session)
+                           :sso-provider-id (:sso-provider-id session)
+                           :sso-session-id (:sso-session-id session)}
+        claims            (if (:created-at session)
+                            (assoc claims :exp (ct/plus (:created-at session) absolute-max-age))
+                            claims)
+        header            {:kid 1 :ver 1}
+        token             (tokens/generate cfg claims header)]
     (assoc session :token token)))
 
 (defn create-fn
@@ -204,7 +211,7 @@
   [{:keys [::manager]}]
   (assert (manager? manager) "expected valid session manager")
   (fn [request response]
-    (some->> (get request ::id) (delete-session manager))
+    (some->> (get request ::session) :id (delete-session manager))
     (clear-session-cookie response)))
 
 (defn decode-token
@@ -226,19 +233,27 @@
     (-> (db/exec-one! cfg [sql (:profile-id session) (:id session)])
         (db/get-update-count))))
 
-(def ^:private sql:clear-org-sso-sessions
+(defn invalidate-all
+  "Delete all sessions for a given profile. Used when a profile is deleted
+  to ensure immediate access revocation across all devices."
+  [cfg profile-id]
+  (let [sql "delete from http_session_v2 where profile_id = ?"]
+    (-> (db/exec-one! cfg [sql profile-id])
+        (db/get-update-count))))
+
+(def ^:private sql:clear-organization-sso-sessions
   (str "UPDATE http_session_v2 "
        "SET props = props #- ARRAY['~:sso', ?]::text[] "
        "WHERE props IS NOT NULL "
        "AND jsonb_exists(props -> '~:sso', ?)"))
 
-(defn clear-org-sso-sessions!
+(defn clear-organization-sso-sessions!
   "Remove the SSO entry for organization-id from the props of every
   session that currently holds it. The key is transit-encoded as the
   string '~u<uuid>' under the '~:sso' path."
   [pool organization-id]
-  (let [org-key (str "~u" organization-id)]
-    (db/exec! pool [sql:clear-org-sso-sessions org-key org-key])))
+  (let [organization-key (str "~u" organization-id)]
+    (db/exec! pool [sql:clear-organization-sso-sessions organization-key organization-key])))
 
 (defn- renew-session?
   [{:keys [id modified-at] :as session}]
@@ -345,15 +360,23 @@
        or (updated_at is null and
            created_at < ?::timestamptz)")
 
+(def ^:private
+  sql:delete-expired-v2
+  "DELETE FROM http_session_v2
+    WHERE created_at < ?::timestamptz")
+
 (defn- collect-expired-tasks
   [{:keys [::db/conn ::tasks/max-age]}]
   (let [threshold (ct/minus (ct/now) max-age)
-        result    (-> (db/exec-one! conn [sql:delete-expired threshold threshold])
-                      (db/get-update-count))]
+        result-legacy (-> (db/exec-one! conn [sql:delete-expired threshold threshold])
+                          (db/get-update-count))
+        result-v2     (-> (db/exec-one! conn [sql:delete-expired-v2 threshold])
+                          (db/get-update-count))]
     (l/dbg :task "gc"
            :hint "clean http sessions"
-           :deleted result)
-    result))
+           :deleted-legacy result-legacy
+           :deleted-v2 result-v2)
+    (+ result-legacy result-v2)))
 
 (defmethod ig/init-key ::tasks/gc
   [_ {:keys [::tasks/max-age] :as cfg}]

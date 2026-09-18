@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.settings.integrations
   (:require-macros [app.main.style :as stl])
@@ -79,13 +79,19 @@
          (mf/deps token-created)
          (fn [event]
            (dom/prevent-default event)
-           (clipboard/to-clipboard (:token token-created))
-           (st/emit! (ntf/show {:level :info
-                                :type :toast
-                                :content (if is-mcp
-                                           (tr "integrations.notification.success.mcp-key-copied")
-                                           (tr "integrations.notification.success.token-copied"))
-                                :timeout notification-timeout}))))]
+           (-> (clipboard/to-clipboard (:token token-created))
+               (.then (fn [_]
+                        (st/emit! (ntf/show {:level :info
+                                             :type :toast
+                                             :content (if is-mcp
+                                                        (tr "integrations.notification.success.mcp-key-copied")
+                                                        (tr "integrations.notification.success.token-copied"))
+                                             :timeout notification-timeout}))))
+               (.catch (fn [_]
+                         (st/emit! (ntf/show {:level :error
+                                              :type :toast
+                                              :content (tr "errors.clipboard-api-unavailable")
+                                              :timeout notification-timeout})))))))]
 
     [:div {:class (stl/css :modal-form)}
      [:> text* {:as "h2"
@@ -115,25 +121,6 @@
          (if is-mcp
            (tr "integrations.mcp-key.will-not-expire")
            (tr "integrations.token.will-not-expire")))]]
-
-     (when is-mcp
-       [:div {:class (stl/css :modal-content)}
-        [:> text* {:as "div"
-                   :typography t/body-small
-                   :class (stl/css :color-primary)}
-         (tr "integrations.info.mcp-client-config")]
-        [:textarea {:class (stl/css :textarea)
-                    :wrap "off"
-                    :rows 7
-                    :read-only true
-                    :value (dm/str
-                            "{\n"
-                            "  \"mcpServers\": {\n"
-                            "    \"penpot\": {\n"
-                            "      \"url\": \"" cf/mcp-server-url "?userToken=" (:token token-created "") "\"\n"
-                            "    }\n"
-                            "  }"
-                            "\n}")}]])
 
      [:div {:class (stl/css :modal-footer)}
       [:> button* {:variant "secondary"
@@ -390,7 +377,7 @@
             :id      "token-delete"
             :handler handle-open-confirm-modal}])]
 
-    [:div {:class (stl/css :item)}
+    [:div {:class (stl/css :item) :data-id (str id)}
      [:> text* {:as "div"
                 :typography t/body-medium
                 :title name
@@ -659,10 +646,12 @@
       (dom/set-html-title (tr "title.settings.integrations"))
       (st/emit! (du/fetch-access-tokens)))
 
-    [:div {:class (stl/css :integrations)}
-     [:> heading* {:level 1
+    [:section {:class (stl/css :integrations)
+               :aria-labelledby "integrations-section-title"}
+     [:> heading* {:level 2
                    :typography t/title-large
-                   :class (stl/css :color-primary)}
+                   :class (stl/css :color-primary)
+                   :id "integrations-section-title"}
       (tr "integrations.title")]
 
      (when ^boolean mcp-enabled?

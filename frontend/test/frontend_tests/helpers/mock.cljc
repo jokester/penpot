@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns frontend-tests.helpers.mock
   "Async-first mocking primitives for ClojureScript tests.
@@ -106,9 +106,12 @@
 
      (defn rpc-cmd-mock
        "Records [cmd params] in [[rpc-calls]], returns `(rx/of nil)`."
-       [cmd params]
-       (swap! rpc-calls conj {:cmd cmd :params params})
-       (rx/of nil))
+       ([cmd params]
+        (swap! rpc-calls conj {:cmd cmd :params params})
+        (rx/of nil))
+       ([cmd params _opts]
+        (swap! rpc-calls conj {:cmd cmd :params params})
+        (rx/of nil)))
 
      (defn revoke-uri-mock
        "Records `uri` in [[revoked-uris]]."
@@ -117,8 +120,10 @@
 
      (defn schedule-on-idle-mock
        "Calls `f` immediately instead of deferring to the idle queue."
-       [f]
-       (f))
+       ([_ms f]
+        (f))
+       ([f]
+        (f)))
 
      (defn timer-mock
        "Returns `(rx/of :immediate)` so debounce timers fire instantly

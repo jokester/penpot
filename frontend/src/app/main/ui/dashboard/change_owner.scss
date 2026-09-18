@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 //
-// Copyright (c) KALEIDOS INC Sucursal en España SL
+// Copyright (c) KALEIDOS SUBSIDIARY SL
 
 @use "refactor/common-refactor.scss" as deprecated;
 @use "ds/typography.scss" as t;
@@ -78,20 +78,20 @@
   width: 100%;
 }
 
-.modal-org-container {
+.modal-organization-container {
   @extend %modal-container-base;
 
   overflow-y: auto;
   max-height: $sz-512;
 }
 
-.modal-org-title {
+.modal-organization-title {
   @include t.use-typography("headline-large");
 
   color: var(--modal-title-foreground-color);
 }
 
-.modal-org-msg {
+.modal-organization-msg {
   @include t.use-typography("body-large");
 
   color: var(--modal-text-foreground-color);

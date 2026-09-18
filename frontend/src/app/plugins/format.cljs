@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.plugins.format
   (:require
@@ -206,11 +206,13 @@
 ;;   strokeCapStart?: StrokeCap;
 ;;   strokeCapEnd?: StrokeCap;
 ;;   strokeColorGradient?: Gradient;
+;;   strokeImage?: ImageData;
 ;; }
 (defn format-stroke
   [{:keys [stroke-color stroke-color-ref-file stroke-color-ref-id
            stroke-opacity stroke-style stroke-width stroke-alignment
-           stroke-cap-start stroke-cap-end stroke-color-gradient] :as stroke}]
+           stroke-cap-start stroke-cap-end stroke-color-gradient
+           stroke-image] :as stroke}]
 
   (when (some? stroke)
     (obj/without-empty
@@ -223,7 +225,8 @@
           :strokeAlignment (format-key stroke-alignment)
           :strokeCapStart (format-key stroke-cap-start)
           :strokeCapEnd (format-key stroke-cap-end)
-          :strokeColorGradient (format-gradient stroke-color-gradient)})))
+          :strokeColorGradient (format-gradient stroke-color-gradient)
+          :strokeImage (format-image stroke-image)})))
 
 
 ;; export interface Blur {

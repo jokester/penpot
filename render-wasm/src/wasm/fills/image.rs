@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::get_render_state;
+use crate::get_resources;
 use crate::mem;
 use crate::shapes::Fill;
 use crate::state::State;
@@ -30,6 +30,7 @@ fn touch_shapes_with_image(state: &mut State, image_id: Uuid) {
 }
 
 const FLAG_KEEP_ASPECT_RATIO: u8 = 1 << 0;
+const FLAG_HAS_TRANSFORM: u8 = 1 << 1;
 const IMAGE_IDS_SIZE: usize = 32;
 const IMAGE_HEADER_SIZE: usize = 36; // 32 bytes for IDs + 4 bytes for is_thumbnail flag
 
@@ -43,22 +44,71 @@ pub struct RawImageFillData {
     d: u32,
     opacity: u8,
     flags: u8,
-    // 16-bit padding here, reserved for future use
+    _pad: u16,
     width: i32,
     height: i32,
+    transform_x: f32,
+    transform_y: f32,
+    transform_w: f32,
+    transform_h: f32,
+}
+
+impl From<&ImageFill> for RawImageFillData {
+    fn from(image_fill: &ImageFill) -> Self {
+        let id = image_fill.id();
+        let (a, b, c, d) = crate::utils::uuid_to_u32_quartet(&id);
+        let mut flags = if image_fill.keep_aspect_ratio() {
+            FLAG_KEEP_ASPECT_RATIO
+        } else {
+            0
+        };
+        let (tx, ty, tw, th) = if let Some(tf) = image_fill.transform() {
+            flags |= FLAG_HAS_TRANSFORM;
+            (tf.x, tf.y, tf.width, tf.height)
+        } else {
+            (0.0, 0.0, 1.0, 1.0)
+        };
+
+        Self {
+            a,
+            b,
+            c,
+            d,
+            opacity: image_fill.opacity(),
+            flags,
+            _pad: 0,
+            width: image_fill.width(),
+            height: image_fill.height(),
+            transform_x: tx,
+            transform_y: ty,
+            transform_w: tw,
+            transform_h: th,
+        }
+    }
 }
 
 impl From<RawImageFillData> for ImageFill {
     fn from(value: RawImageFillData) -> Self {
         let id = uuid_from_u32_quartet(value.a, value.b, value.c, value.d);
         let keep_aspect_ratio = value.flags & FLAG_KEEP_ASPECT_RATIO != 0;
+        let transform = if value.flags & FLAG_HAS_TRANSFORM != 0 {
+            Some(crate::shapes::ImageFillTransform {
+                x: value.transform_x,
+                y: value.transform_y,
+                width: value.transform_w,
+                height: value.transform_h,
+            })
+        } else {
+            None
+        };
 
-        Self::new(
+        Self::new_with_transform(
             id,
             value.opacity,
             value.width,
             value.height,
             keep_aspect_ratio,
+            transform,
         )
     }
 }
@@ -104,13 +154,32 @@ pub extern "C" fn store_image() -> Result<()> {
     let image_bytes = &bytes[IMAGE_HEADER_SIZE..];
 
     with_state!(state, {
-        if let Err(msg) = get_render_state().add_image(ids.image_id, is_thumbnail, image_bytes) {
+        if let Err(msg) = get_resources()
+            .images
+            .add(ids.image_id, is_thumbnail, image_bytes)
+        {
             eprintln!("{}", msg);
         }
         touch_shapes_with_image(state, ids.image_id);
     });
 
     mem::free_bytes()?;
+    Ok(())
+}
+
+/// Registers the public URL an image was loaded from for SVG export.
+///
+/// Layout: UTF-8 URL bytes in the alloc buffer. The image UUID is passed as
+/// the four u32 arguments (same quartet as `store_image` / `is_image_cached`).
+#[no_mangle]
+#[wasm_error]
+pub extern "C" fn store_image_url(a: u32, b: u32, c: u32, d: u32) -> Result<()> {
+    let id = uuid_from_u32_quartet(a, b, c, d);
+    let url_bytes = mem::bytes();
+    let url = String::from_utf8(url_bytes)
+        .map_err(|_| Error::CriticalError("Invalid UTF-8 in image source URL".to_string()))?;
+    mem::free_bytes()?;
+    get_resources().images.set_source_url(id, url);
     Ok(())
 }
 
@@ -174,7 +243,7 @@ pub extern "C" fn store_image_from_texture() -> Result<()> {
     );
 
     with_state!(state, {
-        if let Err(msg) = get_render_state().add_image_from_gl_texture(
+        if let Err(msg) = get_resources().images.add_image_from_gl_texture(
             ids.image_id,
             is_thumbnail,
             texture_id,

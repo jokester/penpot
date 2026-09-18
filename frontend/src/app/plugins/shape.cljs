@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.plugins.shape
   (:require
@@ -34,6 +34,7 @@
    [app.common.types.text :as txt]
    [app.common.uuid :as uuid]
    [app.config :as cf]
+   [app.main.data.exports.assets :as de]
    [app.main.data.exports.wasm :as wasm.exports]
    [app.main.data.persistence :as dwp]
    [app.main.data.plugins :as dp]
@@ -56,6 +57,7 @@
    [app.plugins.format :as format]
    [app.plugins.grid :as grid]
    [app.plugins.parser :as parser]
+   [app.plugins.reflow :as wrfp]
    [app.plugins.register :as r]
    [app.plugins.ruler-guides :as rg]
    [app.plugins.shadows :as shadows]
@@ -78,75 +80,102 @@
   (obj/type-of? p "InteractionProxy"))
 
 (defn interaction-proxy
-  [plugin-id file-id page-id shape-id index]
-  (obj/reify {:name "InteractionProxy"}
-    :$plugin {:enumerable false :get (fn [] plugin-id)}
-    :$file   {:enumerable false :get (fn [] file-id)}
-    :$page   {:enumerable false :get (fn [] page-id)}
-    :$shape  {:enumerable false :get (fn [] shape-id)}
-    :$index  {:enumerable false :get (fn [] index)}
+  "Proxy over one interaction of a shape.
 
-    ;; Not enumerable so we don't have an infinite loop
-    :shape
-    {:enumerable false
-     :get (fn [] (shape-proxy plugin-id file-id page-id shape-id))}
+  Interactions are addressed by position, which shifts as interactions are added
+  or removed, so the position is resolved on each access from `interaction`,
+  kept up to date with the writes made through the proxy."
+  [plugin-id file-id page-id shape-id interaction index]
+  (let [current      (atom interaction)
+        locate-index (fn [] (u/locate-interaction-index file-id page-id shape-id @current index))]
+    (obj/reify {:name "InteractionProxy"}
+      :$plugin {:enumerable false :get (fn [] plugin-id)}
+      :$file   {:enumerable false :get (fn [] file-id)}
+      :$page   {:enumerable false :get (fn [] page-id)}
+      :$shape  {:enumerable false :get (fn [] shape-id)}
+      :$index  {:enumerable false :get locate-index}
 
-    :trigger
-    {:this true
-     :get #(-> % u/proxy->interaction :event-type format/format-key)
-     :set
-     (fn [_ value]
-       (let [value (parser/parse-keyword value)]
+      ;; Not enumerable so we don't have an infinite loop
+      :shape
+      {:enumerable false
+       :get (fn [] (shape-proxy plugin-id file-id page-id shape-id))}
+
+      :trigger
+      {:this true
+       :get #(-> % u/proxy->interaction :event-type format/format-key)
+       :set
+       (fn [_ value]
+         (let [value (parser/parse-keyword value)]
+           (cond
+             (not (contains? ctsi/event-types value))
+             (u/not-valid plugin-id :trigger value)
+
+             (not (r/check-permission plugin-id "content:write"))
+             (u/not-valid plugin-id :trigger "Plugin doesn't have 'content:write' permission")
+
+             :else
+             (do
+               (st/emit! (dwi/update-interaction
+                          (u/locate-shape file-id page-id shape-id)
+                          (locate-index)
+                          #(assoc % :event-type value)
+                          {:page-id page-id}))
+               (swap! current assoc :event-type value)))))}
+
+      :delay
+      {:this true
+       :get #(-> % u/proxy->interaction :delay)
+       :set
+       (fn [_ value]
          (cond
-           (not (contains? ctsi/event-types value))
-           (u/not-valid plugin-id :trigger value)
+           (or (not (sm/valid-safe-int? value)) (neg? value))
+           (u/not-valid plugin-id :delay value)
+
+           (not (r/check-permission plugin-id "content:write"))
+           (u/not-valid plugin-id :delay "Plugin doesn't have 'content:write' permission")
 
            :else
-           (st/emit! (dwi/update-interaction
-                      (u/locate-shape file-id page-id shape-id)
-                      index
-                      #(assoc % :event-type value)
-                      {:page-id page-id})))))}
+           (do
+             (st/emit! (dwi/update-interaction
+                        (u/locate-shape file-id page-id shape-id)
+                        (locate-index)
+                        #(assoc % :delay value)
+                        {:page-id page-id}))
+             (swap! current assoc :delay value))))}
 
-    :delay
-    {:this true
-     :get #(-> % u/proxy->interaction :delay)
-     :set
-     (fn [_ value]
-       (cond
-         (or (not (sm/valid-safe-int? value)) (neg? value))
-         (u/not-valid plugin-id :delay value)
+      :action
+      {:this true
+       :get #(-> % u/proxy->interaction (format/format-action plugin-id file-id page-id))
+       :set
+       (fn [self value]
+         (let [params (parser/parse-action value)
+               interaction
+               (-> (u/proxy->interaction self)
+                   (d/patch-object params))]
+           (cond
+             (not (sm/validate ctsi/schema:interaction interaction))
+             (u/not-valid plugin-id :action interaction)
 
-         :else
-         (st/emit! (dwi/update-interaction
-                    (u/locate-shape file-id page-id shape-id)
-                    index
-                    #(assoc % :delay value)
-                    {:page-id page-id}))))}
+             (not (r/check-permission plugin-id "content:write"))
+             (u/not-valid plugin-id :action "Plugin doesn't have 'content:write' permission")
 
-    :action
-    {:this true
-     :get #(-> % u/proxy->interaction (format/format-action plugin-id file-id page-id))
-     :set
-     (fn [self value]
-       (let [params (parser/parse-action value)
-             interaction
-             (-> (u/proxy->interaction self)
-                 (d/patch-object params))]
-         (cond
-           (not (sm/validate ctsi/schema:interaction interaction))
-           (u/not-valid plugin-id :action interaction)
+             :else
+             (do
+               (st/emit! (dwi/update-interaction
+                          (u/locate-shape file-id page-id shape-id)
+                          (locate-index)
+                          #(d/patch-object % params)
+                          {:page-id page-id}))
+               (reset! current interaction)))))}
 
-           :else
-           (st/emit! (dwi/update-interaction
-                      (u/locate-shape file-id page-id shape-id)
-                      index
-                      #(d/patch-object % params)
-                      {:page-id page-id})))))}
+      :remove
+      (fn []
+        (cond
+          (not (r/check-permission plugin-id "content:write"))
+          (u/not-valid plugin-id :remove "Plugin doesn't have 'content:write' permission")
 
-    :remove
-    (fn []
-      (st/emit! (dwi/remove-interaction {:id shape-id} index)))))
+          :else
+          (st/emit! (dwi/remove-interaction {:id shape-id} (locate-index))))))))
 
 (def lib-typography-proxy? nil)
 (def lib-component-proxy nil)
@@ -198,14 +227,14 @@
       (not (sm/validate [:vector types.fills/schema:fill] value))
       (u/not-valid plugin-id :fills value)
 
+      (not (r/check-permission plugin-id "content:write"))
+      (u/not-valid plugin-id :fills "Plugin doesn't have 'content:write' permission")
+
       (not (u/page-active? (obj/get self "$page")))
       (u/not-valid plugin-id :fills "Cannot modify a page that is not currently active")
 
       (cfh/text-shape? shape)
       (st/emit! (dwt/update-attrs id {:fills value}))
-
-      (not (r/check-permission plugin-id "content:write"))
-      (u/not-valid plugin-id :fills "Plugin doesn't have 'content:write' permission")
 
       :else
       (st/emit! (dwsh/update-shapes [id] #(assoc % :fills value))))))
@@ -964,8 +993,9 @@
             (fn [self]
               (let [interactions (-> self u/proxy->shape :interactions)]
                 (format/format-array
-                 #(interaction-proxy plugin-id file-id page-id id %)
-                 (range 0 (count interactions)))))}
+                 (fn [[index interaction]]
+                   (interaction-proxy plugin-id file-id page-id id interaction index))
+                 (d/enumerate interactions))))}
 
            ;; Methods
            :resize
@@ -1052,6 +1082,14 @@
 
                :else
                (st/emit! (dwsh/delete-shapes #{id}))))
+
+           :waitForLayoutUpdate
+           (fn [timeout]
+             ;; Wait for layout work that can affect this shape.
+             (let [objects (u/locate-objects file-id page-id)]
+               (wrfp/wait-for-layout-update
+                (wrfp/shape-wait-ids objects file-id id)
+                timeout)))
 
            ;; Plugin data
            :getPluginData
@@ -1465,6 +1503,9 @@
            :detach
            (fn []
              (cond
+               (not (r/check-permission plugin-id "content:write"))
+               (u/not-valid plugin-id :detach "Plugin doesn't have 'content:write' permission")
+
                (not (u/page-active? page-id))
                (u/not-valid plugin-id :detach "Cannot modify a page that is not currently active")
 
@@ -1475,11 +1516,11 @@
            (fn [component]
              (let [shape (u/locate-shape file-id page-id id)]
                (cond
-                 (not (u/page-active? page-id))
-                 (u/not-valid plugin-id :swapComponent "Cannot modify a page that is not currently active")
-
                  (not (r/check-permission plugin-id "content:write"))
                  (u/not-valid plugin-id :swapComponent "Plugin doesn't have 'content:write' permission")
+
+                 (not (u/page-active? page-id))
+                 (u/not-valid plugin-id :swapComponent "Cannot modify a page that is not currently active")
 
                  (not (obj/type-of? component "LibraryComponentProxy"))
                  (u/not-valid plugin-id :swapComponent "Component not valid")
@@ -1497,11 +1538,11 @@
            (fn []
              (let [shape (u/locate-shape file-id page-id id)]
                (cond
-                 (not (u/page-active? page-id))
-                 (u/not-valid plugin-id :resetOverrides "Cannot modify a page that is not currently active")
-
                  (not (r/check-permission plugin-id "content:write"))
                  (u/not-valid plugin-id :resetOverrides "Plugin doesn't have 'content:write' permission")
+
+                 (not (u/page-active? page-id))
+                 (u/not-valid plugin-id :resetOverrides "Cannot modify a page that is not currently active")
 
                  (not (ctk/in-component-copy? shape))
                  (u/not-valid plugin-id :resetOverrides "The shape is not a component copy instance")
@@ -1516,6 +1557,9 @@
                (cond
                  (not (sm/validate ctse/schema:export value))
                  (u/not-valid plugin-id :export value)
+
+                 (not (r/check-permission plugin-id "content:read"))
+                 (u/not-valid plugin-id :export "Plugin doesn't have 'content:read' permission")
 
                  :else
                  (if (and (contains? cf/flags :wasm-export)
@@ -1547,13 +1591,13 @@
                           :profile-id (:profile-id @st/state)
                           :wait true
                           :is-wasm false
-                          :exports [{:file-id   file-id
-                                     :page-id   page-id
-                                     :object-id id
-                                     :name      (:name shape)
-                                     :type      (:type value :png)
-                                     :suffix    (:suffix value "")
-                                     :scale     (:scale value 1)}]}]
+                          :exports [(de/normalize-export {:file-id   file-id
+                                                          :page-id   page-id
+                                                          :object-id id
+                                                          :name      (:name shape)
+                                                          :type      (:type value :png)
+                                                          :suffix    (:suffix value "")
+                                                          :scale     (:scale value 1)})]}]
                      (js/Promise.
                       (fn [resolve reject]
                         ;; The exporter renders the file from its persisted
@@ -1588,18 +1632,27 @@
                  (not (sm/validate ctsi/schema:interaction interaction))
                  (u/not-valid plugin-id :addInteraction interaction)
 
+                 (not (r/check-permission plugin-id "content:write"))
+                 (u/not-valid plugin-id :addInteraction "Plugin doesn't have 'content:write' permission")
+
                  :else
                  (let [index (-> (u/locate-shape file-id page-id id) (:interactions [])  count)]
                    (st/emit!
                     (dwi/add-interaction page-id id interaction)
                     (se/event plugin-id "add-interaction"))
-                   (interaction-proxy plugin-id file-id page-id id index)))))
+                   (interaction-proxy plugin-id file-id page-id id interaction index)))))
 
            :removeInteraction
            (fn [interaction]
              (cond
                (not (interaction-proxy? interaction))
                (u/not-valid plugin-id :removeInteraction interaction)
+
+               (not (r/check-permission plugin-id "content:write"))
+               (u/not-valid plugin-id :removeInteraction "Plugin doesn't have 'content:write' permission")
+
+               (not= id (obj/get interaction "$shape"))
+               (u/not-valid plugin-id :removeInteraction "The interaction doesn't belong to this shape")
 
                :else
                (st/emit!
@@ -1681,8 +1734,14 @@
             :fn (fn [token attrs]
                   (let [token (u/locate-token file-id (obj/get token "$set-id") (obj/get token "$id"))
                         kw-attrs (into #{} (map token-attr-plugin->token-attr attrs))]
-                    (if (some #(not (token-attr? %)) kw-attrs)
+                    (cond
+                      (some #(not (token-attr? %)) kw-attrs)
                       (u/not-valid plugin-id :applyToken attrs)
+
+                      (not (r/check-permission plugin-id "content:write"))
+                      (u/not-valid plugin-id :applyToken "Plugin doesn't have 'content:write' permission")
+
+                      :else
                       (st/emit!
                        (-> (dwta/toggle-token {:token token
                                                :attrs kw-attrs
@@ -1710,6 +1769,9 @@
                (not (string? value))
                (u/not-valid plugin-id :value value)
 
+               (not (r/check-permission plugin-id "content:write"))
+               (u/not-valid plugin-id :switchVariant "Plugin doesn't have 'content:write' permission")
+
                :else
                (let [shape     (u/locate-shape file-id page-id id)
                      component (u/locate-library-component file-id (:component-id shape))]
@@ -1722,6 +1784,9 @@
              (cond
                (or (not (seq ids)) (not (every? uuid/parse* ids)))
                (u/not-valid plugin-id :ids ids)
+
+               (not (r/check-permission plugin-id "content:write"))
+               (u/not-valid plugin-id :combineAsVariants "Plugin doesn't have 'content:write' permission")
 
                :else
                (let [;; Keep the input order (head shape first): it determines

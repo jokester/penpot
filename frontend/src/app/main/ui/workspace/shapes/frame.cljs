@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.workspace.shapes.frame
   (:require
@@ -136,10 +136,11 @@
             width          (dm/get-prop bounds :width)
             height         (dm/get-prop bounds :height)
 
-            thumbnail-uri* (mf/with-memo [file-id page-id frame-id]
-                             (let [object-id (thc/fmt-object-id file-id page-id frame-id "frame")]
-                               (refs/workspace-thumbnail-by-id object-id)))
-            thumbnail-uri  (mf/deref thumbnail-uri*)
+            thumbnail-data* (mf/with-memo [file-id page-id frame-id]
+                              (let [object-id (thc/fmt-object-id file-id page-id frame-id "frame")]
+                                (refs/workspace-thumbnail-by-id object-id)))
+            thumbnail-data  (mf/deref thumbnail-data*)
+            thumbnail-uri   (:uri thumbnail-data)
 
             modifiers-ref  (mf/with-memo [frame-id]
                              (refs/workspace-modifiers-by-frame-id frame-id))

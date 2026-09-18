@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.workspace.shapes.text.viewport-texts-html
   (:require
@@ -12,10 +12,12 @@
    [app.common.geom.point :as gpt]
    [app.common.geom.shapes :as gsh]
    [app.common.geom.shapes.text :as gsht]
+   [app.common.logging :as log]
    [app.common.math :as mth]
    [app.common.types.modifiers :as ctm]
    [app.common.types.text :as txt]
    [app.common.uuid :as uuid]
+   [app.main.data.workspace.reflow :as wrf]
    [app.main.data.workspace.texts :as dwt]
    [app.main.fonts :as fonts]
    [app.main.refs :as refs]
@@ -94,7 +96,13 @@
                                 (not migrate))
                        (st/emit! (dwt/resize-text id width height)))))
 
-                 (st/emit! (dwt/clean-text-modifier id))))))
+                 (st/emit! (dwt/clean-text-modifier id))))
+       ;; Always clear the task and log measurement errors.
+       (p/catch (fn [cause]
+                  (log/error :hint "Could not measure text shape"
+                             :shape-id id
+                             :cause cause)
+                  nil))))
 
 (defn- update-text-modifier
   [{:keys [grow-type id] :as shape} node]
@@ -183,11 +191,17 @@
         (mf/use-fn
          (fn [shape node]
            ;; Unique to indentify the pending state
-           (let [uid (uuid/next)]
-             (swap! pending-update* assoc uid (:id shape))
-             (p/then
-              (update-text-shape shape node)
-              #(swap! pending-update* dissoc uid)))))]
+           (let [uid (uuid/next)
+                 id  (:id shape)]
+             (swap! pending-update* assoc uid id)
+             ;; Callback refs run at the DOM commit boundary. Track the exact
+             ;; measurement promise from that acknowledgement; any resize it
+             ;; schedules owns the following task in the chain.
+             (wrf/run-pending!
+              :text-measure
+              [id]
+              #(-> (update-text-shape shape node)
+                   (p/finally (fn [] (swap! pending-update* dissoc uid))))))))]
 
     [:.text-changes-renderer
      (for [{:keys [id] :as shape} changed-texts]

@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.data.workspace.mcp
   (:require
@@ -14,13 +14,17 @@
    [app.main.broadcast :as mbc]
    [app.main.data.plugins :as dp]
    [app.main.data.profile :as du]
+   [app.main.data.workspace :as-alias dw]
    [app.main.store :as st]
    [app.plugins.register :as preg]
    [app.util.timers :as ts]
    [beicon.v2.core :as rx]
    [potok.v2.core :as ptk]))
 
-(def retry-interval 10000)
+(def reconnect-fallback-interval 60000)
+
+(def reconnect-fallback-statuses
+  #{"disconnected" "error"})
 
 (log/set-level! :info)
 
@@ -54,11 +58,13 @@
     (reset!
      interval-sub
      (ts/interval
-      retry-interval
+      reconnect-fallback-interval
       (fn []
-        ;; Try to reconnect if active and not connected
-        (when-not (contains? #{"connecting" "connected"}
-                             (-> @st/state :mcp :connection-status))
+        ;; Slow app-level fallback. The plugin owns normal WebSocket
+        ;; reconnects; this only restarts it if the app remains in a
+        ;; failed connection state.
+        (when (contains? reconnect-fallback-statuses
+                         (-> @st/state :mcp :connection-status))
           (.log js/console "Reconnecting to MCP...")
           (st/emit! (ptk/data-event ::connect))))))))
 
@@ -127,7 +133,7 @@
                           (assoc :host (str (u/join cf/public-uri "plugins/mcp/"))))
 
             stopper-s (rx/merge
-                       (rx/filter (ptk/type? :app.main.data.workspace/finalize-workspace) stream)
+                       (rx/filter (ptk/type? ::dw/finalize-workspace) stream)
                        (rx/filter (ptk/type? ::stop-mcp-plugin) stream))
 
             extension #js {:getToken (constantly token)
@@ -197,7 +203,7 @@
     ptk/WatchEvent
     (watch [_ state stream]
       (let [stopper-s  (rx/merge
-                        (rx/filter (ptk/type? :app.main.data.workspace/finalize-workspace) stream)
+                        (rx/filter (ptk/type? ::dw/finalize-workspace) stream)
                         (rx/filter (ptk/type? ::init) stream))
 
             session-id (get state :session-id)

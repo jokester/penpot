@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.plugins.text
   (:require
@@ -33,7 +33,7 @@
 
 (def ^:private font-size-re #"^\d*\.?\d*$")
 (def ^:private line-height-re #"^\d*\.?\d*$")
-(def ^:private letter-spacing-re #"^\d*\.?\d*$")
+(def ^:private letter-spacing-re #"^-?\d*\.?\d*$")
 (def ^:private text-transform-re #"uppercase|capitalize|lowercase|none")
 (def ^:private text-decoration-re #"underline|line-through|none")
 (def ^:private text-direction-re #"ltr|rtl")
@@ -499,10 +499,10 @@
             (u/not-valid plugin-id :growType "Cannot modify a page that is not currently active")
 
             :else
-            (st/emit!
-             (dwsh/update-shapes [id] #(assoc % :grow-type value))
-             (when (features/active-feature? @st/state "render-wasm/v1")
-               (st/emit! (dwwt/resize-wasm-text-debounce id)))))))}
+            (do
+              (st/emit! (dwsh/update-shapes [id] #(assoc % :grow-type value)))
+              (when (features/active-feature? @st/state "render-wasm/v1")
+                (st/emit! (dwwt/resize-wasm-text-debounce id)))))))}
 
      {:name "fontId"
       :get #(-> % u/proxy->shape text-props :font-id format/format-mixed)

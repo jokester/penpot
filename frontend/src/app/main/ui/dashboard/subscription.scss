@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 //
-// Copyright (c) KALEIDOS INC Sucursal en España SL
+// Copyright (c) KALEIDOS SUBSIDIARY SL
 
 @use "refactor/common-refactor.scss" as deprecated;
 @use "common/refactor/common-dashboard";
@@ -225,7 +225,7 @@
   border-radius: var(--sp-s);
   flex-direction: column;
   margin: var(--sp-m) var(--sp-m) 0;
-  background: var(--color-background-quaternary);
+  background: var(--color-accent-select);
   border: $b-1 solid var(--color-accent-primary-muted);
   padding: var(--sp-l);
 }

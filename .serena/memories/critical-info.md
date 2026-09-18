@@ -7,14 +7,21 @@ You are working on the GitHub project `penpot/penpot`, a monorepo.
    before focused memories.
 - Edits/stale refs/duplication cleanup: `mem:memory-maintenance`.
 - Cross-cutting testing principles, TDD workflow, and anti-patterns: `mem:testing`.
+- Verified Clojure language behaviors that contradict common assumptions
+  (e.g. `int?` covers `Long`; `integer?` is the general predicate):
+  `mem:clojure/idioms` — read before assuming stdlib predicate semantics.
 
 # Development workflow
 
 - Commit/PR/issue creation is **on explicit request only**. Before any of these actions, read the relevant memory — don't infer format from prior examples:
-  - Before `git commit` → `mem:workflow/creating-commits` (subject format, body, `AI-assisted-by: model-name` trailer)
+  - Before `git commit` → `mem:workflow/creating-commits` (subject/body format, 76-char body wrapping enforced by `scripts/check-commit`, `AI-assisted-by: model-name` trailer)
   - Before `gh issue create` → `mem:workflow/creating-issues` (title derivation, body template, labels, Issue Type)
   - Before `gh pr create` / `gh pr edit` → `mem:workflow/creating-prs` (title format, body structure, "Note:" line)
+- Before a repo-wide pnpm version update → `mem:workflow/updating-pnpm` (workspace
+  layout, `corepack use` sweep order, the stamp-missing-field and
+  ignored-builds gotchas, verification steps)
 - **Never `git push`, force-push, or modify `git origin`** (or any other remote). The user pushes from their own shell; if a push is required, say so and wait. Never amend a commit that the user has already pushed unless explicitly asked.
+- **Never edit `CHANGES.md` by hand.** The changelog is generated from GitHub milestones during the release process; update it only via the `update-changelog` skill flow or on explicit user request.
 - You have access to the GitHub CLI `gh` or corresponding MCP tools.
 - Issues are also managed on Taiga. Read issues using the `read_taiga_issue` tool.
 - Before writing code, analyze the task in depth and describe your plan. If the task is complex, break it down into atomic steps.
@@ -22,23 +29,24 @@ You are working on the GitHub project `penpot/penpot`, a monorepo.
 - Align `let` binding values: when a `let` form has multiple bindings spanning
   several lines, align the value forms to the same column with spaces.
 - If you introduce delimiter errors (mismatched parens/brackets) in Clojure/CLJS files,
-  fix them with `tools/paren-repair.bb` BEFORE running lint/format checks.
-  See `mem:tools/paren-repair` for usage.
+  fix them with `scripts/paren-repair` BEFORE running lint/format checks.
+  See `mem:scripts/paren-repair` for usage.
 - Never run anything that destroys data without explicit permission, including `drop-devenv`, `docker compose down -v`, `docker volume rm ...`. The user's real work lives in the volumes of the shared infra.
 
 # Project modules
 
 This is a monorepo. Principles that apply to one module do *not* generally apply to others. Do not make assumptions.
 
-- `frontend/`: ClojureScript + SCSS SPA/design editor.
-- `backend/`: JVM Clojure HTTP/RPC server with PostgreSQL, Redis, storage, mail, and workers.Runtime services and the task-queue vs Pub/Sub topology that constrains horizontal scaling: `mem:prod-infra/core`.
-- `common/`: shared CLJC data types, geometry, schemas, file/change logic, and utilities.
-- `render-wasm/`: Rust -> WebAssembly Skia renderer consumed by frontend.
-- `exporter/`: ClojureScript/Node headless Playwright SVG/PDF export.
-- `mcp/`: TypeScript Model Context Protocol integration.
-- `plugins/`: TypeScript plugin runtime/examples and Plugin API types.
-- `library/`: design library workflows.
-- `docs/`: documentation site.
+- `frontend/`: ClojureScript + SCSS SPA/design editor; core conventions: `mem:frontend/core`.
+- `backend/`: JVM Clojure HTTP/RPC server with PostgreSQL, Redis, storage, mail, and workers; core conventions: `mem:backend/core`. Runtime services and the task-queue vs Pub/Sub topology that constrains horizontal scaling: `mem:prod-infra/core`.
+- `common/`: shared CLJC data types, geometry, schemas, file/change logic, and utilities; core conventions: `mem:common/core`.
+- `render-wasm/`: Rust -> WebAssembly Skia renderer consumed by frontend; core conventions: `mem:render-wasm/core`.
+- `exporter/`: ClojureScript/Node headless Playwright SVG/PDF export; core conventions: `mem:exporter/core`.
+- `mcp/`: TypeScript Model Context Protocol integration; core conventions: `mem:mcp/core`.
+- `plugins/`: TypeScript plugin runtime/examples and Plugin API types; core conventions: `mem:plugins/core`.
+- `library/`: design library workflows; core conventions: `mem:library/core`.
+- `docs/`: documentation site; core workflow and conventions: `mem:docs/core`.
+- `media-processor/`: TypeScript/Node.js HTTP service for image (sharp) and font (FontForge) processing; core conventions: `mem:media-processor/core`.
 
 The memory is structured in a way that you can get the critical information about the
 module. You can read it from `mem:<MODULE>/core`
@@ -52,20 +60,31 @@ module. You can read it from `mem:<MODULE>/core`
 - `experiments/` contains standalone experimental HTML/JS/scripts; treat it as non-core unless the user explicitly asks about it.
 - `sample_media/` contains sample image/icon media and config used as fixtures/demo material; do not infer app behavior from it.
 
-# Dev tools
+# Dev Scripts (scripts/)
 
-- `tools/nrepl-eval.mjs` — Evaluate Clojure/ClojureScript code via nREPL.
+- `scripts/nrepl-eval.mjs` — Evaluate Clojure/ClojureScript code via nREPL.
   Supports `--backend` (port 6064) and `--frontend` (port 3447) aliases.
-  See `mem:tools/nrepl-eval`.
-- `tools/paren-repair.bb` — Fix mismatched delimiters in Clojure/CLJS files
+  See `mem:scripts/nrepl-eval`.
+- `scripts/paren-repair` — Fix mismatched delimiters in Clojure/CLJS files
   and reformat with cljfmt. Run before lint checks when LLM edits break parens.
-  See `mem:tools/paren-repair`.
-- `tools/psql` — PostgreSQL client wrapper with devenv defaults.
-  Companion: `tools/db-schema` for DDL dumps. See `mem:tools/psql`.
-- `tools/taiga.py` — Fetch public issues, user stories, and tasks from the
-  Penpot Taiga project without authentication. See `mem:tools/taiga`.
-- `tools/gh.py` — GitHub operations helper: list milestone issues, fetch PR
-  details, compare against CHANGES.md. Requires `gh` CLI. See `mem:tools/gh`.
+  See `mem:scripts/paren-repair`.
+- `scripts/psql` — PostgreSQL client wrapper with devenv defaults.
+  Companion: `scripts/db-schema` for DDL dumps. See `mem:scripts/psql`.
+- `scripts/taiga.py` — Fetch public issues, user stories, and tasks from the
+  Penpot Taiga project without authentication. See `mem:scripts/taiga`.
+- `scripts/gh.py` — GitHub operations helper: list milestone issues, fetch PR
+  details, compare against CHANGES.md. Requires `gh` CLI. See `mem:scripts/gh`.
+- `scripts/error-reports.mjs` — Query error reports via RPC API with token
+  authentication. Supports list/get operations with filtering and pagination.
+  See `mem:scripts/error-reports`.
+- `scripts/clean-node-modules` — Remove stale `node_modules` from all pnpm
+  workspaces (root, modules, member packages). Keeps the shared pnpm store
+  at `<repo>/.pnpm-store` unless `--store`; ignores `external/` and
+  `.opencode/`. Usage and reinstall steps: `mem:workflow/updating-pnpm`.
+- `scripts/ci` — CI orchestration script: runs lint, tests, and format
+  checks per module (`frontend backend common render-wasm exporter mcp
+  plugins library`). Logs go to `.ci-logs/`; read the log file on failure.
+  See `mem:scripts/ci`.
 
 # Dependency graph
 

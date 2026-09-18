@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.util.code-gen.style-css-formats
   (:require
@@ -34,6 +34,10 @@
    :border-end-start-radius   :string-or-size-array
    :border-end-end-radius     :string-or-size-array
    :border-width              :border-width
+   :border-block-start-width  :border-width
+   :border-inline-end-width   :border-width
+   :border-block-end-width    :border-width
+   :border-inline-start-width :border-width
    :border-style              :border-style
    :border-color              :border-color
    :box-shadow                :shadows

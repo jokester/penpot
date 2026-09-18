@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.srepl.cli
   "PREPL API for external usage (CLI or ADMIN)"
@@ -29,7 +29,7 @@
 
 (defn- get-current-system
   []
-  (or (deref (requiring-resolve 'app.main/system))
+  (or (deref (requiring-resolve 'app.system/system))
       (deref (requiring-resolve 'user/system))))
 
 (defmulti ^:private exec-command ::cmd)
@@ -232,7 +232,7 @@
                  [:enum
                   "customer_service"
                   "low_quality"
-                  "missing_feature"
+                  "missing_features"
                   "other"
                   "switched_service"
                   "too_complex"

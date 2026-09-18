@@ -13,6 +13,7 @@ Frontend: CLJS SPA; React/Rumext; Potok; RxJS; okulary refs; SCSS modules; share
 - `app.util.*`: DOM, HTTP, i18n, keyboard, codegen, and general frontend utilities.
 - `frontend/packages/*` and `frontend/text-editor`: JS/TS workspace packages consumed by the app.
 - Nitrate subscription/organization UI and flows live under `app.main.data.nitrate` and `app.main.ui.nitrate*`; backend/API behavior is covered by backend memories, and shared permission rules are in `common/src/app/common/types/nitrate_permissions.cljc`.
+- `app.config` external bridges (`external-feature-flag`, `external-session-id`, `external-context-info`, `external-notify-register-success`, `initialize-external-context-info`) delegate to `globalThis` hooks injected by the SaaS host. Never delete `external-feature-flag`, even with zero call sites: it is the seam for future A/B tests.
 
 
 ## Lint and Format
@@ -23,13 +24,13 @@ From `frontend/`:
 - JS lint currently no-ops via `pnpm run lint:js`.
 - SCSS lint: `pnpm run lint:scss`.
 - Format checks: `pnpm run check-fmt:clj`, `pnpm run check-fmt:js`, `pnpm run check-fmt:scss`.
-- Format fix: `pnpm run fmt`, or targeted `fmt:clj` / `fmt:js` / `fmt:scss`.
+- Format fix: `pnpm run fmt`, or targeted `fmt:clj` / `fmt:js` / `fmt:scss`. After running `fmt:*`, `check-fmt:*` is redundant.
 - Translation formatting after i18n edits: `pnpm run translations`.
 
 **Before linting:** if delimiter errors are suspected (after LLM edits, or
-lint/compiler reports syntax errors), run `tools/paren-repair.bb` on the
+lint/compiler reports syntax errors), run `scripts/paren-repair` on the
 affected files first. Delimiter errors produce misleading linter output.
-See `mem:tools/paren-repair`.
+See `mem:scripts/paren-repair`.
 
 ## Focused memory routing
 

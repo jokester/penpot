@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.data.workspace.shapes
   (:require
@@ -23,14 +23,12 @@
    [app.main.data.helpers :as dsh]
    [app.main.data.workspace.collapse :as dwco]
    [app.main.data.workspace.edition :as dwe]
+   [app.main.data.workspace.reflow :as wrf]
+   [app.main.data.workspace.reflow.signals :as wrfs]
    [app.main.data.workspace.selection :as dws]
    [app.main.data.workspace.undo :as dwu]
    [beicon.v2.core :as rx]
    [potok.v2.core :as ptk]))
-
-;; If anything a translation can mutate is added here, drop the
-;; `(when-not translation? …)` guard in `update-shapes` below.
-(def ^:private update-layout-attr? #{:hidden})
 
 (defn- add-undo-group
   [changes state]
@@ -62,15 +60,35 @@
     (update [_ state]
       (assoc state ::update-shapes-buffer false))))
 
+(defn- get-buffered-text-reflow-event
+  [state page-id ids]
+  (when (= page-id (get state :current-page-id))
+    ;; Analyze accumulated objects through the same path as immediate updates.
+    (let [objects         (dsh/lookup-page-objects state page-id)
+          changed-objects (-> (get-in state [::update-shapes-buffer-changes page-id])
+                              (pcb/lookup-objects))
+          {:keys [text-ids]}
+          (wrfs/reflow-ids state page-id objects changed-objects ids nil)]
+      (when text-ids
+        (ptk/data-event :text/reflow {:ids text-ids :page-id page-id})))))
+
 (defn update-shapes-buffer-commit
   []
   (ptk/reify ::update-shapes-buffer-commit
     ptk/WatchEvent
     (watch [_ state _]
-      (->> (get state ::update-shapes-buffer-changes)
-           (vals)
-           (map dch/commit-changes)
-           (rx/from)))))
+      (let [text-reflow-events
+            (->> (get state ::update-shapes-buffer-text-candidates)
+                 (keep (fn [[page-id ids]]
+                         (get-buffered-text-reflow-event state page-id ids))))
+
+            commits
+            (->> (get state ::update-shapes-buffer-changes)
+                 (vals)
+                 (map dch/commit-changes))]
+        ;; Open bridges before commits start rendering.
+        (rx/concat (rx/from text-reflow-events)
+                   (rx/from commits))))))
 
 ;; Looks for the objects data in the state, if there is an "in progress"
 ;; update-shapes-buffer will return the objeccts inside the current changes
@@ -91,7 +109,8 @@
    (update-shapes-buffer ids update-fn nil))
   ([ids update-fn
     {:keys [reg-objects? save-undo? stack-undo? attrs ignore-tree page-id
-            ignore-touched undo-group with-objects? changed-sub-attr translation?]
+            ignore-touched undo-group with-objects? changed-sub-attr
+            translation? skip-grid-reassignment? skip-component-sync?]
      :or {reg-objects? false
           save-undo? true
           stack-undo? false
@@ -106,9 +125,14 @@
            (assoc state ::update-shapes-buffer-event cur-event)
 
            (let [page-id (or page-id (get state :current-page-id))
-                 objects   (dsh/lookup-page-objects state page-id)]
-             (-> state
+                 objects (lookup-changed-objects state page-id)
+                 text-ids
+                 (into #{}
+                       (filter #(cfh/text-shape? objects %))
+                       ids)
+                 state
                  (update-in
+                  state
                   [::update-shapes-buffer-changes page-id]
                   (fn [changes]
                     (-> (or changes
@@ -126,9 +150,19 @@
                           :changed-sub-attr changed-sub-attr
                           :ignore-tree ignore-tree
                           :ignore-touched ignore-touched
-                          :with-objects? with-objects?})
+                          :with-objects? with-objects?
+                          :skip-grid-reassignment? skip-grid-reassignment?})
                         (cond-> reg-objects? (pcb/resize-parents ids))
-                        (pcb/set-translation? translation?))))))))
+                        (pcb/set-translation? translation?)
+                        (pcb/set-skip-component-sync? skip-component-sync?))))]
+             ;; Check buffered text candidates when the buffer is committed.
+             (if (or (empty? text-ids)
+                     (not (wrfs/text-reflow-candidate? state props)))
+               state
+               (update-in state
+                          [::update-shapes-buffer-text-candidates page-id]
+                          (fnil into #{})
+                          text-ids)))))
 
        ptk/WatchEvent
        (watch [_ state stream]
@@ -145,6 +179,7 @@
 
               (rx/of #(dissoc %
                               ::update-shapes-buffer-changes
+                              ::update-shapes-buffer-text-candidates
                               ::update-shapes-buffer-event))))
            (rx/empty)))))))
 
@@ -155,13 +190,12 @@
     {:as props
      :keys [reg-objects? save-undo? stack-undo? attrs ignore-tree page-id
             ignore-touched undo-group with-objects? changed-sub-attr translation?
-            update-layout?]
+            skip-grid-reassignment? skip-component-sync?]
      :or {reg-objects? false
           save-undo? true
           stack-undo? false
           ignore-touched false
-          with-objects? false
-          update-layout? true}}]
+          with-objects? false}}]
 
    (assert (every? uuid? ids) "expect a coll of uuid for `ids`")
    (assert (fn? update-fn) "the `update-fn` should be a valid function")
@@ -177,26 +211,6 @@
                objects   (dsh/lookup-page-objects state page-id)
                ids       (into [] (filter some?) ids)
 
-               xf-update-layout
-               (comp
-                (map (d/getf objects))
-                (filter #(some update-layout-attr? (pcb/changed-attrs % objects update-fn {:attrs attrs :with-objects? with-objects?})))
-                (map :id))
-
-               ;; `changed-attrs` runs `update-fn` in full for every shape, which
-               ;; can be expensive (e.g. `update-bool-shape` recalculates the whole
-               ;; boolean path in WASM). Skip the pass entirely when we can prove it
-               ;; cannot match: when the caller declares `attrs`, `changed-attrs`
-               ;; filters its result to that set, so if no layout attr is present
-               ;; the check is always empty.
-               update-layout-ids
-               (when-not (or translation?
-                             (not update-layout?)
-                             (and (some? attrs)
-                                  (not (some update-layout-attr? attrs))))
-                 (->> (into [] xf-update-layout ids)
-                      (not-empty)))
-
                changes
                (-> (pcb/empty-changes it page-id)
                    (pcb/set-save-undo? save-undo?)
@@ -209,23 +223,38 @@
                                                 :ignore-tree ignore-tree
                                                 :ignore-touched ignore-touched
                                                 :with-objects? with-objects?
-                                                :translation? translation?})
+                                                :translation? translation?
+                                                :skip-grid-reassignment? skip-grid-reassignment?})
                    (cond-> undo-group
                      (pcb/set-undo-group undo-group))
-                   (pcb/set-translation? translation?))
+                   (pcb/set-translation? translation?)
+                   (pcb/set-skip-component-sync? skip-component-sync?))
+
+               changed-objects
+               (pcb/lookup-objects changes)
+
+               {:keys [layout-ids text-ids]}
+               (wrfs/reflow-ids state page-id objects changed-objects ids props)
 
                changes
                (add-undo-group changes state)]
 
            (rx/concat
+            ;; Announces the texts still to be re-measured, so a reflow wait
+            ;; covers the render that measures them. Goes before the commit,
+            ;; which is what triggers that render.
+            (if text-ids
+              (rx/of (ptk/data-event :text/reflow {:ids text-ids :page-id page-id}))
+              (rx/empty))
+
             (if (seq (:redo-changes changes))
               (let [changes (cond-> changes reg-objects? (pcb/resize-parents ids))]
                 (rx/of (dch/commit-changes changes)))
               (rx/empty))
 
             ;; Update layouts for properties marked
-            (if update-layout-ids
-              (rx/of (ptk/data-event :layout/update {:ids update-layout-ids}))
+            (if layout-ids
+              (rx/of (ptk/data-event :layout/update {:ids layout-ids}))
               (rx/empty)))))))))
 
 (defn add-shape
@@ -269,6 +298,10 @@
 
          (rx/concat
           (rx/of (dwu/start-undo-transaction undo-id)
+                 ;; A new text has no geometry until the pipeline measures it,
+                 ;; so it raises the same signal an edit does.
+                 (when (wrfs/new-text-reflow? state shape)
+                   (ptk/data-event :text/reflow {:ids [(:id shape)] :page-id page-id}))
                  (dch/commit-changes changes)
                  (when-not no-update-layout?
                    (ptk/data-event :layout/update {:ids [(:parent-id shape)]}))
@@ -327,6 +360,7 @@
              fdata         (dsh/lookup-file-data state file-id)
              page          (dsh/get-page fdata page-id)
              objects       (:objects page)
+             deleted-ids   (into #{} (mapcat #(cfh/get-children-ids-with-self objects %)) ids)
 
              undo-id (or (:undo-id options) (js/Symbol))
              [all-parents changes]
@@ -336,6 +370,7 @@
                                               :undo-group (:undo-group options)
                                               :undo-id undo-id}))]
 
+         (wrf/cancel-shapes! deleted-ids)
          (rx/of (dwu/start-undo-transaction undo-id)
                 (dc/detach-comment-thread ids)
                 (dch/commit-changes changes)

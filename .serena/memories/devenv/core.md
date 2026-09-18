@@ -6,6 +6,7 @@ Compose-based dev environment under `docker/devenv/`, driven by `manage.sh`. Par
 
 - `penpotdev-infra`: shared `postgres`, `minio`, `minio-setup`, `mailer`, `ldap`. File: `docker-compose.infra.yml`.
 - `penpotdev-wsN` (N=0,1,…): per-instance `main` + `redis` (Valkey). File: `docker-compose.main.yml`. ws0 (a.k.a. `main`) binds `$PWD`; ws1+ bind clones at `${PENPOT_WORKSPACES_DIR}/wsN/` (default `~/.penpot/penpot_workspaces/`), maintained by the developer.
+- Optional overlay `docker-compose.opencode.yml`: added by `instance-compose` as an extra `-f` only when `PENPOT_OPENCODE_CONFIG_DIR` is set (i.e. `run-devenv --opencode-config-dir DIR` ran in this process). Bind-mounts the host dir at `/home/penpot/.config/opencode` (`:z`). Flag-only, per-call; not read from ambient env. Parser `parse-opencode-config-dir` absolutizes (`~`, realpath) because compose resolves relative bind sources against the compose file's dir. Only instances brought up with the flag get the mount.
 - All projects join external network `penpot_shared`. Created idempotently by `ensure-devenv-network`, never removed by lifecycle commands.
 
 ## Source-of-truth files
@@ -25,7 +26,9 @@ Compose-based dev environment under `docker/devenv/`, driven by `manage.sh`. Par
 
 ## Worker policy
 
-Backend workers run only on ws0. `_env` gates `enable-backend-worker` on `PENPOT_BACKEND_WORKER`; ws1+ inject it as false. ws0 must be running whenever any ws1+ is running, and is the last instance to stop — `run-devenv --agentic --ws N` (N≥1) auto-starts ws0 first; `stop-devenv` refuses to stop ws0 while any ws1+ is up. Workers are pure fire-and-forget: `wrk/submit!` inserts a row into the shared Postgres `task` table and returns; RPC handlers never wait on completion and workers never publish to msgbus. The reason for "ws0 only" is avoiding multi-instance worker races (cron dedup is best-effort across instances, `wrk/submit!` `dedupe` is racy across submitters); details in `mem:prod-infra/core`.
+Backend workers run only on ws0. `_env` gates `enable-backend-worker` on `PENPOT_BACKEND_WORKER`; ws1+ inject it as false. Workers are pure fire-and-forget: `wrk/submit!` inserts a row into the shared Postgres `task` table and returns; RPC handlers never wait on completion and workers never publish to msgbus. The reason for "ws0 only" is avoiding multi-instance worker races (cron dedup is best-effort across instances, `wrk/submit!` `dedupe` is racy across submitters); details in `mem:prod-infra/core`.
+
+Each workspace is independent and can be started/stopped in any order. Shared infra (postgres, minio, etc.) is shut down only when no instances remain running.
 
 ## Port layout
 
@@ -63,8 +66,8 @@ No `--delete` on the working-tree pass: gitignored caches in the workspace survi
 
 ## CLI surface
 
-- `run-devenv --agentic [--ws main|0|wsN|N] [--sync] [--serena-context CTX]`: bring one instance up. Agentic only — MCP and Serena windows are always created. Default target main. Errors out if the target is already running. `--sync` is rejected on main; on ws1+ it's optional (forced only when the workspace dir does not exist yet). Auto-starts ws0 first when the target is ws1+ and ws0 is not yet up.
-- `stop-devenv [--ws main|0|wsN|N] [--all]`: stop instances. Flags mutually exclusive. `--ws N` (N≥1) stops just that workspace. `--ws 0` or no flag stops ws0 + shared infra, refused while any ws1+ is running. `--all` stops every ws highest-first then ws0, then infra.
+- `run-devenv --agentic [--ws main|0|wsN|N] [--sync] [--serena-context CTX] [--opencode-config-dir DIR]`: bring one instance up. Agentic only — MCP and Serena windows are always created. Default target main. Errors out if the target is already running. `--sync` is rejected on main; on ws1+ it's optional (forced only when the workspace dir does not exist yet). `--opencode-config-dir DIR` bind-mounts DIR at `~/.config/opencode` in-container via the optional overlay above; mount applies at container creation, so changing it requires stop + re-run.
+- `stop-devenv [--ws main|0|wsN|N] [--all]`: stop instances. Flags mutually exclusive. `--ws N` stops just that workspace. `--ws 0` or no flag stops ws0; shared infra shuts down only if no other instances remain. `--all` stops every ws highest-first then ws0, then infra.
 - `run-devenv`: legacy alias, ws0 non-agentic attached.
 - `attach-devenv [--ws main|0|wsN|N]`: pure attach. Fails fast if instance/session missing.
 - `run-devenv-shell [--instance 0|wsN|N] [cmd...]`: bash in target instance. (`--instance` flag not yet renamed to `--ws`.)

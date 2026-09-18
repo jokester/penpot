@@ -2,14 +2,16 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.util.clipboard
   (:require
    ["./clipboard.js" :as impl]
    [app.common.transit :as t]
    [app.util.dom :as dom]
-   [beicon.v2.core :as rx]))
+   [app.util.i18n :refer [tr]]
+   [beicon.v2.core :as rx]
+   [cuerdas.core :as str]))
 
 (def image-types
   ["image/webp"
@@ -20,6 +22,18 @@
 (def ^:private default-options
   #js {:decodeTransit t/decode-str
        :allowHTMLPaste false})
+
+(defn plain-text->html
+  "Build a minimal text/html clipboard payload from plain text.
+
+  Windows apps often prefer CF_HTML over CF_UNICODETEXT; writing only
+  text/plain from a contenteditable copy handler can leave them with the
+  editor surface's empty/`<br>` fallback (a lone newline)."
+  [text]
+  (let [escaped (-> (or text "")
+                    (dom/escape-html)
+                    (str/replace "\n" "<br>"))]
+    (str "<meta charset=\"utf-8\">" escaped)))
 
 (defn- from-data-transfer
   "Get clipboard stream from DataTransfer instance"
@@ -123,32 +137,112 @@
         (.write ^js clipboard #js [data]))
       (unavailable-error))))
 
+(defn- get-clipboard-item-ctor
+  "Return the `ClipboardItem` constructor, or nil on the browsers that
+   expose `clipboard.write` without it (Chrome < 116)."
+  []
+  (unchecked-get js/globalThis "ClipboardItem"))
+
+(defn- writable-mime?
+  "Browsers keep an allowlist of MIME types accepted by
+   `clipboard.write`; `image/svg+xml` is outside Firefox's (#10596).
+   `ClipboardItem.supports` exposes it when available; assume writable
+   otherwise, since `write` is still guarded by a rejection fallback."
+  [mime]
+  (let [ctor     (get-clipboard-item-ctor)
+        supports (some-> ctor (unchecked-get "supports"))]
+    (if (fn? supports)
+      (boolean (.call ^js supports ctor mime))
+      true)))
+
+(defn- unsupported-mime-error?
+  "True when `cause` is the `DOMException` a browser raises for a MIME
+   type outside its clipboard allowlist (#10596): \"Type 'image/svg+xml'
+   not supported for write\". Any other rejection (document not focused,
+   permission denied, insecure origin) must reach the caller instead of
+   being degraded to a text-only write."
+  [cause]
+  (let [message (str (when (some? cause) (unchecked-get cause "message")))]
+    (str/includes? message "not supported")))
+
+(defn- create-multi-clipboard-item
+  [items]
+  (js/ClipboardItem.
+   (reduce-kv
+    (fn [acc mime payload]
+      (let [blob (js/Blob. #js [payload] #js {:type mime})]
+        (unchecked-set acc mime (js/Promise.resolve blob))
+        acc))
+    #js {} items)))
+
+(defn- to-clipboard-text
+  [clipboard items]
+  (if-let [text (or (get items "text/plain")
+                    (first (vals items)))]
+    (if (unchecked-get clipboard "writeText")
+      (.writeText ^js clipboard text)
+      (unavailable-error))
+    (js/Promise.resolve)))
+
 (defn to-clipboard-multi
   "Write multiple MIME representations as a single ClipboardItem.
    `items` is a map of mime-type (string) -> string payload.
 
-   Falls back to `writeText` with the `text/plain` payload (or the
-   first available payload) when the asynchronous `clipboard.write`
-   API is unavailable. If neither path is reachable (e.g. insecure
-   origin), returns a rejected Promise mirroring `to-clipboard`'s
-   contract instead of throwing synchronously."
+   MIME types the browser refuses to write (per `ClipboardItem.supports`)
+   are dropped, and a `clipboard.write` rejected for an unsupported MIME
+   type falls back to `writeText` with the `text/plain` payload (or the
+   first available payload), which is also the path taken when
+   `clipboard.write` or `ClipboardItem` are missing altogether. Any other
+   rejection is propagated. If no path is reachable (e.g. insecure origin),
+   returns a rejected Promise mirroring `to-clipboard`'s contract instead
+   of throwing synchronously."
   [items]
-  (let [clipboard (get-clipboard)]
+  (let [clipboard (get-clipboard)
+        writable  (when clipboard
+                    (into {} (filter (comp writable-mime? key)) items))]
     (cond
-      (and clipboard (unchecked-get clipboard "write"))
-      (let [obj  (reduce-kv
-                  (fn [acc mime payload]
-                    (let [blob (js/Blob. #js [payload] #js {:type mime})]
-                      (unchecked-set acc mime (js/Promise.resolve blob))
-                      acc))
-                  #js {} items)
-            item (js/ClipboardItem. obj)]
-        (.write ^js clipboard #js [item]))
+      (and clipboard (seq writable)
+           (unchecked-get clipboard "write")
+           (some? (get-clipboard-item-ctor)))
+      (-> (.write ^js clipboard #js [(create-multi-clipboard-item writable)])
+          (.catch (fn [cause]
+                    (if (unsupported-mime-error? cause)
+                      (to-clipboard-text clipboard items)
+                      (js/Promise.reject cause)))))
 
-      (and clipboard (unchecked-get clipboard "writeText"))
-      (when-let [text (or (get items "text/plain")
-                          (first (vals items)))]
-        (.writeText ^js clipboard text))
+      (some? clipboard)
+      (to-clipboard-text clipboard items)
 
       :else
       (unavailable-error))))
+
+(defn read-text
+  "Read the system clipboard as plain text. Always returns a Promise, rejecting
+   like `to-clipboard` when the asynchronous Clipboard API is not exposed."
+  []
+  (let [clipboard (get-clipboard)]
+    (if (and clipboard (unchecked-get clipboard "readText"))
+      (.readText ^js clipboard)
+      (unavailable-error))))
+
+(defn permission-error?
+  "True for the `NotAllowedError` DOMException raised when access is denied."
+  [cause]
+  (and (instance? js/DOMException cause)
+       (= (.-name cause) "NotAllowedError")))
+
+(defn unavailable-error?
+  "True when `navigator.clipboard` is undefined, e.g. on an insecure origin."
+  [cause]
+  (and (instance? js/Error cause)
+       (str/starts-with? (.-message cause) "Clipboard API is unavailable.")))
+
+(defn error-message
+  "Translated message for a clipboard failure, or nil for any other error."
+  [cause]
+  (cond
+    (permission-error? cause)
+    (tr "errors.clipboard-permission-denied")
+
+    (unavailable-error? cause)
+    (tr "errors.clipboard-api-unavailable")))

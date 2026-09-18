@@ -3,16 +3,13 @@
 use macros::ToJs;
 
 use crate::shapes::{
-    Fill, FontFamily, TextAlign, TextContent, TextDecoration, TextDirection,
+    Fill, FontStyle, TextAlign, TextContent, TextDecoration, TextDirection,
     TextPositionWithAffinity, TextTransform, VerticalAlign,
 };
 use crate::uuid::Uuid;
 use crate::wasm::text::helpers::{self as text_helpers, find_text_span_at_offset};
 use crate::wasm::text_editor::CursorDirection;
-use skia_safe::{
-    textlayout::{Affinity, PositionWithAffinity},
-    Color,
-};
+use skia_safe::Color;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TextSelection {
@@ -88,6 +85,7 @@ impl TextSelection {
 }
 
 /// Events that the text editor can emit for frontend synchronization
+/// FIXME: the serialization should be in the wasm module
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ToJs)]
 pub enum TextEditorEvent {
@@ -100,7 +98,7 @@ pub enum TextEditorEvent {
 
 /// FIXME: It should be better to get these constants from the frontend through the API.
 const SELECTION_COLOR: Color = Color::from_argb(127, 0, 209, 184);
-const CURSOR_COLOR: Color = Color::BLACK;
+const CURSOR_COLOR: Color = Color::WHITE;
 const CURSOR_WIDTH: f32 = 1.0;
 const CURSOR_BLINK_INTERVAL_MS: f32 = 530.0;
 
@@ -111,7 +109,12 @@ pub struct TextEditorStyles {
     pub text_direction: Multiple<TextDirection>, // Multiple
     pub text_decoration: Multiple<TextDecoration>,
     pub text_transform: Multiple<TextTransform>,
-    pub font_family: Multiple<FontFamily>,
+    // The font family is decomposed into its independent parts so the family
+    // dropdown shows a single family even when the selection mixes variants of
+    // the same family (e.g. regular + bold italic). The id identifies the
+    // family; weight is tracked by `font_weight`; only the style is left here.
+    pub font_family_id: Multiple<Uuid>,
+    pub font_style: Multiple<FontStyle>,
     pub font_size: Multiple<f32>,
     pub font_weight: Multiple<i32>,
     pub font_variant_id: Multiple<Uuid>,
@@ -121,7 +124,8 @@ pub struct TextEditorStyles {
     pub fills: Vec<Fill>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+// FIXME: the serialization should be in the wasm module
+#[derive(Debug, Clone, Copy, PartialEq, ToJs)]
 #[repr(u8)]
 pub enum MultipleState {
     Undefined = 0,
@@ -228,7 +232,8 @@ impl TextEditorStyles {
             text_direction: Multiple::empty(),
             text_decoration: Multiple::empty(),
             text_transform: Multiple::empty(),
-            font_family: Multiple::empty(),
+            font_family_id: Multiple::empty(),
+            font_style: Multiple::empty(),
             font_size: Multiple::empty(),
             font_weight: Multiple::empty(),
             font_variant_id: Multiple::empty(),
@@ -244,7 +249,8 @@ impl TextEditorStyles {
         self.text_direction.reset();
         self.text_decoration.reset();
         self.text_transform.reset();
-        self.font_family.reset();
+        self.font_family_id.reset();
+        self.font_style.reset();
         self.font_size.reset();
         self.font_weight.reset();
         self.font_variant_id.reset();
@@ -265,6 +271,10 @@ pub struct TextEditorTheme {
     pub selection_color: Color,
     pub cursor_color: Color,
     pub cursor_width: f32,
+    /// When true the caret is painted with a Difference blend mode, so it shows
+    /// as the inverted color of whatever is behind it. Used as the default when
+    /// the text has no solid fill whose color the caret can match.
+    pub cursor_invert: bool,
 }
 
 pub struct TextComposition {
@@ -316,7 +326,7 @@ impl TextComposition {
 
         let focus = selection.focus;
         let previous_len = self.previous.chars().count();
-        let anchor = TextPositionWithAffinity::new_without_affinity(
+        let anchor = TextPositionWithAffinity::new_downstream_affinity(
             focus.paragraph,
             focus.offset + previous_len,
         );
@@ -355,6 +365,7 @@ impl TextEditorState {
                 selection_color: SELECTION_COLOR,
                 cursor_color: CURSOR_COLOR,
                 cursor_width: CURSOR_WIDTH,
+                cursor_invert: true,
             },
             selection: TextSelection::new(),
             composition: TextComposition::new(),
@@ -371,11 +382,15 @@ impl TextEditorState {
     }
 
     pub fn focus(&mut self, shape_id: Uuid) {
+        let same_shape = self.active_shape_id == Some(shape_id);
+
         self.has_focus = true;
         self.active_shape_id = Some(shape_id);
         self.cursor_visible = true;
         self.last_blink_time_ms = 0.0;
-        self.selection.reset();
+        if !same_shape {
+            self.selection.reset();
+        }
         self.is_pointer_selection_active = false;
         self.is_overtype_mode = false;
         self.pending_events.clear();
@@ -419,31 +434,36 @@ impl TextEditorState {
         true
     }
 
-    pub fn select_all(&mut self, text_content: &TextContent) -> bool {
+    fn select_range(
+        &mut self,
+        text_content: &TextContent,
+        start: &TextPositionWithAffinity,
+        end: &TextPositionWithAffinity,
+    ) {
         self.is_pointer_selection_active = false;
-        self.set_caret_from_position(&TextPositionWithAffinity::empty());
-        let num_paragraphs = text_content.paragraphs().len() - 1;
+        self.is_click_event_skipped = false;
+        self.set_caret_from_position(start);
+        self.extend_selection_from_position(end);
+        self.update_styles(text_content);
+        self.reset_blink();
+        self.push_event(TextEditorEvent::SelectionChanged);
+    }
+
+    pub fn select_all(&mut self, text_content: &TextContent) -> bool {
+        let num_paragraphs = text_content.paragraphs().len().saturating_sub(1);
         let Some(last_paragraph) = text_content.paragraphs().last() else {
             return false;
         };
         let Some(_last_text_span) = last_paragraph.children().last() else {
             return false;
         };
-        let mut offset = 0;
-        for span in last_paragraph.children() {
-            offset += span.text.len();
-        }
-        self.extend_selection_from_position(&TextPositionWithAffinity::new(
-            PositionWithAffinity {
-                position: offset as i32,
-                affinity: Affinity::Upstream,
-            },
-            num_paragraphs,
-            offset,
-        ));
-        self.update_styles(text_content);
-        self.reset_blink();
-        self.push_event(TextEditorEvent::SelectionChanged);
+        // Offsets are counted in characters, not bytes.
+        let offset = text_helpers::paragraph_char_count(last_paragraph);
+        self.select_range(
+            text_content,
+            &TextPositionWithAffinity::empty(),
+            &TextPositionWithAffinity::new_upstream_affinity(num_paragraphs, offset),
+        );
 
         true
     }
@@ -453,8 +473,6 @@ impl TextEditorState {
         text_content: &TextContent,
         position: &TextPositionWithAffinity,
     ) {
-        self.is_pointer_selection_active = false;
-
         let paragraphs = text_content.paragraphs();
         if paragraphs.is_empty() || position.paragraph >= paragraphs.len() {
             return;
@@ -469,7 +487,7 @@ impl TextEditorState {
 
         let chars: Vec<char> = paragraph_text.chars().collect();
         if chars.is_empty() {
-            self.set_caret_from_position(&TextPositionWithAffinity::new_without_affinity(
+            self.set_caret_from_position(&TextPositionWithAffinity::new_downstream_affinity(
                 position.paragraph,
                 0,
             ));
@@ -491,7 +509,7 @@ impl TextEditorState {
         }
 
         if !text_helpers::is_word_char(chars[offset]) {
-            self.set_caret_from_position(&TextPositionWithAffinity::new_without_affinity(
+            self.set_caret_from_position(&TextPositionWithAffinity::new_downstream_affinity(
                 position.paragraph,
                 position.offset.min(chars.len()),
             ));
@@ -511,26 +529,46 @@ impl TextEditorState {
             end += 1;
         }
 
-        self.set_caret_from_position(&TextPositionWithAffinity::new_without_affinity(
-            position.paragraph,
-            start,
-        ));
-        self.extend_selection_from_position(&TextPositionWithAffinity::new_without_affinity(
-            position.paragraph,
-            end,
-        ));
-        self.update_styles(text_content);
-        self.reset_blink();
-        self.push_event(TextEditorEvent::SelectionChanged);
+        self.select_range(
+            text_content,
+            &TextPositionWithAffinity::new_downstream_affinity(position.paragraph, start),
+            &TextPositionWithAffinity::new_downstream_affinity(position.paragraph, end),
+        );
+    }
+
+    pub fn select_paragraph(
+        &mut self,
+        text_content: &TextContent,
+        position: &TextPositionWithAffinity,
+    ) {
+        let paragraphs = text_content.paragraphs();
+        if paragraphs.is_empty() || position.paragraph >= paragraphs.len() {
+            return;
+        }
+
+        // Offsets are counted in characters, not bytes.
+        let offset = text_helpers::paragraph_char_count(&paragraphs[position.paragraph]);
+
+        self.select_range(
+            text_content,
+            &TextPositionWithAffinity::new_downstream_affinity(position.paragraph, 0),
+            &TextPositionWithAffinity::new_upstream_affinity(position.paragraph, offset),
+        );
     }
 
     pub fn set_caret_from_position(&mut self, position: &TextPositionWithAffinity) {
         self.selection.set_caret(*position);
+        // Restart the blink so the caret is solid right after it is placed,
+        // instead of keeping whatever phase it had (which can toggle off at the
+        // moment of the click and read as a flash). Mirrors the keyboard paths
+        // (`move_cursor`, `select_all`) which already reset the blink.
+        self.reset_blink();
         self.push_event(TextEditorEvent::SelectionChanged);
     }
 
     pub fn extend_selection_from_position(&mut self, position: &TextPositionWithAffinity) {
         self.selection.extend_to(*position);
+        self.reset_blink();
         self.push_event(TextEditorEvent::SelectionChanged);
     }
 
@@ -614,8 +652,11 @@ impl TextEditorState {
                     .text_transform
                     .merge(span.text_transform);
                 self.current_styles
-                    .font_family
-                    .merge(Some(span.font_family));
+                    .font_family_id
+                    .merge(Some(span.font_family.id()));
+                self.current_styles
+                    .font_style
+                    .merge(Some(span.font_family.style()));
                 self.current_styles.font_size.merge(Some(span.font_size));
                 self.current_styles
                     .font_weight
@@ -667,8 +708,11 @@ impl TextEditorState {
                     .text_transform
                     .set_single(text_span.text_transform);
                 self.current_styles
-                    .font_family
-                    .set_single(Some(text_span.font_family));
+                    .font_family_id
+                    .set_single(Some(text_span.font_family.id()));
+                self.current_styles
+                    .font_style
+                    .set_single(Some(text_span.font_family.style()));
                 self.current_styles
                     .font_size
                     .set_single(Some(text_span.font_size));
@@ -768,8 +812,7 @@ impl TextEditorState {
             }
         }
 
-        text_content.layout.paragraphs.clear();
-        text_content.layout.paragraph_builders.clear();
+        text_content.layout.clear();
 
         self.reset_blink();
         self.push_event(TextEditorEvent::ContentChanged);
@@ -794,8 +837,7 @@ impl TextEditorState {
             self.selection.set_caret(clamped);
         }
 
-        text_content.layout.paragraphs.clear();
-        text_content.layout.paragraph_builders.clear();
+        text_content.layout.clear();
 
         self.reset_blink();
         self.push_event(TextEditorEvent::ContentChanged);
@@ -812,12 +854,11 @@ impl TextEditorState {
         let cursor = self.selection.focus;
         if text_helpers::split_paragraph_at_cursor(text_content, &cursor) {
             let new_cursor =
-                TextPositionWithAffinity::new_without_affinity(cursor.paragraph + 1, 0);
+                TextPositionWithAffinity::new_downstream_affinity(cursor.paragraph + 1, 0);
             self.selection.set_caret(new_cursor);
         }
 
-        text_content.layout.paragraphs.clear();
-        text_content.layout.paragraph_builders.clear();
+        text_content.layout.clear();
 
         self.reset_blink();
         self.push_event(TextEditorEvent::ContentChanged);

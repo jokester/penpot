@@ -2,13 +2,12 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns common-tests.files-migrations-test
   (:require
    [app.common.data :as d]
    [app.common.files.migrations :as cfm]
-   [app.common.pprint :as pp]
    [app.common.types.file :as ctf]
    [app.common.uuid :as uuid]
    [clojure.test :as t]))

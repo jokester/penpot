@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.ds.tooltip.tooltip
   (:require-macros
@@ -322,25 +322,26 @@
          (let [trigger-el (mf/ref-val trigger-ref)
                tooltip-el (mf/ref-val tooltip-ref)]
            (when (and trigger-el tooltip-el)
-             (ts/raf
-              (fn []
-                (let [origin-brect (dom/get-bounding-rect trigger-el)
-                      tooltip-brect (dom/get-bounding-rect tooltip-el)
-                      window-size (dom/get-window-size)]
-                  (when-let [[new-placement placement-rect]
-                             (find-matching-placement
-                              placement
-                              tooltip-brect
-                              origin-brect
-                              window-size
-                              offset)]
-                    (dom/set-css-property! tooltip-el "inset-block-start"
-                                           (str (:top placement-rect) "px"))
-                    (dom/set-css-property! tooltip-el "inset-inline-start"
-                                           (str (:left placement-rect) "px"))
+             (let [raf-id (ts/raf
+                           (fn []
+                             (let [origin-brect (dom/get-bounding-rect trigger-el)
+                                   tooltip-brect (dom/get-bounding-rect tooltip-el)
+                                   window-size (dom/get-window-size)]
+                               (when-let [[new-placement placement-rect]
+                                          (find-matching-placement
+                                           placement
+                                           tooltip-brect
+                                           origin-brect
+                                           window-size
+                                           offset)]
+                                 (dom/set-css-property! tooltip-el "inset-block-start"
+                                                        (str (:top placement-rect) "px"))
+                                 (dom/set-css-property! tooltip-el "inset-inline-start"
+                                                        (str (:left placement-rect) "px"))
 
-                    (when (not= new-placement placement)
-                      (reset! placement* new-placement)))))))))))
+                                 (when (not= new-placement placement)
+                                   (reset! placement* new-placement))))))]
+               #(ts/cancel-af! raf-id)))))))
 
     [:> :div props
      children

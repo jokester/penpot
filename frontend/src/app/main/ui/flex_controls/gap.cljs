@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.flex-controls.gap
   (:require
@@ -97,6 +97,11 @@
                    (st/emit! (dwm/set-modifiers modifiers)))
                  (when on-change
                    (on-change modifiers)))))))]
+
+    (mf/with-effect []
+      (fn []
+        (when (some? @resizing)
+          (fcc/clear-transform-preview!))))
 
     [:g.gap-rect
      [:rect.info-area

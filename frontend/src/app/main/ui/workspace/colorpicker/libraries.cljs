@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.workspace.colorpicker.libraries
   (:require-macros [app.main.style :as stl])
@@ -108,7 +108,8 @@
              gradient-text]])
 
          image
-         [:span (tr "media.image")]
+         [:span {:class (stl/css :color-row-colorpicker-label)}
+          (:name image)]
 
          color
          (if name
@@ -124,7 +125,8 @@
                opacity-text])])
 
          :else
-         [:span (tr "labels.other")])]]]))
+         [:span {:class (stl/css :color-row-colorpicker-label)}
+          (tr "labels.other")])]]]))
 
 ;; ---------------------------------------------------------------------------
 ;; Grouped color list

@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.shapes.frame
   (:require
@@ -98,8 +98,8 @@
     [:g.frame-container-wrapper {:opacity opacity}
      [:g.frame-container-blur {:filter filter-str-blur}
       [:defs
-       [:& filters/filters {:shape (dissoc shape :blur) :filter-id filter-id-shadows}]
-       [:& filters/filters {:shape (assoc shape :shadow []) :filter-id filter-id-blur}]]
+       [:> filters/filters* {:shape (dissoc shape :blur) :filter-id filter-id-shadows}]
+       [:> filters/filters* {:shape (assoc shape :shadow []) :filter-id filter-id-blur}]]
 
       ;; This need to be separated in two layers so the clip doesn't affect the shadow filters
       ;; otherwise the shadow will be clipped and not visible

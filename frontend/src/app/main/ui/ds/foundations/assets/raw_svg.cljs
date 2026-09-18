@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.ds.foundations.assets.raw-svg
   (:refer-clojure :exclude [mask])
@@ -22,6 +22,7 @@
 (def ^:svg-id logo-subscription "logo-subscription")
 (def ^:svg-id logo-subscription-light "logo-subscription-light")
 (def ^:svg-id nitrate-welcome "nitrate-welcome")
+(def ^:svg-id nitrate-welcome-light "nitrate-welcome-light")
 (def ^:svg-id marketing-arrows "marketing-arrows")
 (def ^:svg-id marketing-exchange "marketing-exchange")
 (def ^:svg-id marketing-file "marketing-file")

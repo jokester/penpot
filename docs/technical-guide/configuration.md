@@ -433,12 +433,66 @@ PENPOT_FLAGS: [...] enable-air-gapped-conf
 When Penpot starts, it will leave out the Nginx configuration related to external requests. This means that,
 with this flag enabled, the Penpot configuration will disable as well the libraries and templates dashboard and the use of Google fonts.
 
+## Security headers
+
+The frontend container always emits `X-Content-Type-Options`, `Referrer-Policy`,
+`Permissions-Policy` and `X-Frame-Options`. Two additional headers are configurable.
+
+### Content Security Policy
+
+Penpot ships a Content Security Policy in **report-only** mode by default. In this mode
+browsers report violations to the developer console but do not block anything, which makes
+it safe to enable everywhere while the policy is being tuned.
+
+```bash
+PENPOT_CSP_MODE: report-only    # report-only (default) | enforce | disabled
+```
+
+The default policy is same-origin except for what the application genuinely requires:
+`'wasm-unsafe-eval'` for the render engine, `'unsafe-inline'` styles for the inline style
+attributes emitted by the UI, and `blob:`/`data:` for thumbnails, exports and fonts. The
+external Google Fonts and GitHub templates endpoints do not need entries of their own
+because they are reverse proxied by the frontend container.
+
+Two known sources of violations remain, and both are the reason `enforce` is not yet the
+default:
+
+- The `index.html` inline `<script type="module">` and `<script type="importmap">` blocks
+  are not covered by the policy yet.
+- Deployments with plugins enabled report `eval` and remote fetch violations, because the
+  plugin sandbox evaluates third-party code and loads it from arbitrary hosts.
+
+Set your own policy with `PENPOT_CSP_POLICY` if you need to relax or tighten it, for
+example to allow plugins:
+
+```bash
+PENPOT_CSP_POLICY: "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'self'; form-action 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' https: blob: data:; worker-src 'self' blob:; media-src 'self' blob:; frame-src 'self' https:; manifest-src 'self'"
+```
+
+<p class="advice">
+  Because of the above, <code class="language-bash">enforce</code> requires a policy of your
+  own. Enforcing the default policy will prevent the application from loading.
+</p>
+
+### HTTP Strict Transport Security
+
+HSTS is enabled automatically when `PENPOT_PUBLIC_URI` uses the `https` scheme, and
+disabled otherwise. Override the header value directly to customise it, or set it to an
+empty value to disable it:
+
+```bash
+PENPOT_HSTS_VALUE: "max-age=63072000; includeSubDomains; preload"
+```
+
+Note that `includeSubDomains` and `preload` affect every host under your domain and are
+hard to roll back, so they are not enabled by default.
+
 ## High availability
 
 The mechanisms for installing Penpot in HA depend largely on how each infrastructure is managed.
 In this section, we mention the key factors to consider when replicating a Penpot installation:
 
-The components that can be replicated are the `frontend`, the `backend`, and the `exporter`.
+The components that can be replicated are the `frontend`, the `backend`, the `exporter` and the `mcp`.
 Replication management depends on the infrastructure, whether it's a load balancer or a Kubernetes deployment with HPA.
 
 In a high-availability (HA) scenario, managing the state outside of replicas is crucial. This affects the following components:
@@ -446,12 +500,6 @@ In a high-availability (HA) scenario, managing the state outside of replicas is 
 - Database: Penpot typically operates with a single database instance. This database can also have a replica in case the primary instance fails.
 - Valkey: Penpot only needs one Valkey instance to function correctly. Due to the nature of the data it manages, replication isn't even essential.
 - User media storage: This should not be configured with local storage but rather with centralized storage, such as Kubernetes PVC or S3.
-
-
-__Since version 2.15.0__
-
-Starting with version 2.15, we have introduced the MCP server. Due to architectural constraints, using the MCP server requires running only a single instance of Penpot.
-If the MCP server is not installed, then Penpot can scale normally and multiple application instances may be deployed without restrictions.
 
 ## Backend
 
@@ -588,7 +636,7 @@ PENPOT_FLAGS: [...] enable-auto-file-snapshot               # Enable automatic v
 
 # Backend
 PENPOT_AUTO_FILE_SNAPSHOT_EVERY: 5             # How many save operations trigger the auto-save-version?
-PENPOT_AUTO_FILE_SNAPSHOT_TIIMEOUT: "1h"       # How often is an automatic save forced even if the `every` trigger is not met?
+PENPOT_AUTO_FILE_SNAPSHOT_TIMEOUT: "1h"       # How often is an automatic save forced even if the `every` trigger is not met?
 ```
 
 Setting custom values for auto-file-snapshot does not change the behaviour for manual versions.
@@ -666,6 +714,48 @@ PENPOT_INTERNAL_URI: http://penpot-frontend:8080
   `http://penpot-frontend:8080` used in the docker-compose is a good default and
   it is recommended to keep it unchanged.
 
+### MCP
+
+The MCP server lets AI agents read and edit Penpot files. It runs as a separate
+`penpot-mcp` container, and the frontend proxies the requests to it. Enable it with
+the corresponding flag:
+
+```bash
+PENPOT_FLAGS: [...] enable-mcp
+```
+
+With the flag enabled, the frontend container uses these variables to locate the MCP
+server:
+
+```bash
+# Frontend
+PENPOT_MCP_URI: http://penpot-mcp:4401
+PENPOT_MCP_URI_WS: http://penpot-mcp:4402
+```
+
+- `PENPOT_MCP_URI`: The URI of the MCP server, used for the streamable HTTP and SSE
+  endpoints.
+- `PENPOT_MCP_URI_WS`: The URI of the MCP server used for the websocket connection.
+
+The defaults match the service name used in the official `docker-compose.yaml`. Change
+them only if your MCP service has a different name or listens on other ports. Both
+variables are ignored when the `enable-mcp` flag is not set.
+
+### Internal resolver
+
+The frontend container resolves the backend, exporter and MCP service names with the
+DNS servers listed in its `/etc/resolv.conf`. If that autodetection does not work for
+your setup, set the resolver explicitly:
+
+```bash
+# Frontend
+PENPOT_INTERNAL_RESOLVER: 127.0.0.11
+```
+
+- `PENPOT_INTERNAL_RESOLVER`: The DNS server nginx uses to resolve the internal service
+  names. Defaults to the nameservers found in `/etc/resolv.conf`. `127.0.0.11` is the
+  embedded Docker DNS server; use the address of your own resolver on other setups.
+
 ## Other flags
 
 There are other flags that are useful for a more customized Penpot experience. This section has the list of the flags meant
@@ -676,6 +766,9 @@ for the user:
 - <code class="language-bash">enable-backend-api-doc</code>: Enables the <code class="language-bash">/api/doc</code>
   endpoint that lists all rpc methods available on backend
 - <code class="language-bash">disable-login-with-password</code>: allows disable password based login form
+- <code class="language-bash">enable-mcp</code>: Enables the MCP server integration, so AI agents can
+  read and edit Penpot files. It also makes the frontend proxy the MCP endpoints to the
+  <code class="language-bash">penpot-mcp</code> service. Check the [MCP section][8] to get more detail.
 - <code class="language-bash">enable-prepl-server</code>: enables PREPL server, used by manage.py and other additional
   tools to communicate internally with Penpot backend. Check the [CLI section][5] to get more detail.
 
@@ -691,6 +784,9 @@ __Since version 2.0.0__
 - <code class="language-bash">enable-webhooks</code>: enables webhooks. More detail about this configuration in [webhooks section][6].
 - <code class="language-bash">enable-access-tokens</code>: enables access tokens. More detail about this configuration in [access tokens section][7].
 - <code class="language-bash">disable-google-fonts-provider</code>: disables the google fonts provider.
+- <code class="language-bash">enable-link-preview</code>: enables Open Graph link previews for shared links.
+  File names and dashboard thumbnails become readable by anyone holding the link, so only enable
+  it if you accept that trade-off. More detail in the [link previews page][9].
 
 [1]: /technical-guide/getting-started#configure-penpot-with-elestio
 [2]: /technical-guide/getting-started#configure-penpot-with-docker
@@ -699,3 +795,5 @@ __Since version 2.0.0__
 [5]: /technical-guide/getting-started/docker#using-the-cli-for-administrative-tasks
 [6]: /technical-guide/integration/#webhooks
 [7]: /technical-guide/integration/#access-tokens
+[8]: /mcp/
+[9]: /technical-guide/developer/subsystems/link-preview/

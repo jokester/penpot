@@ -42,11 +42,11 @@
     state))
 
 (defn use-shortcuts
-  [key shortcuts]
+  [key shortcuts group-key]
   (mf/use-effect
    #js [(str key) shortcuts]
    (fn []
-     (st/emit! (dsc/push-shortcuts key shortcuts))
+     (st/emit! (dsc/push-shortcuts key shortcuts group-key))
      (fn []
        (st/emit! (dsc/pop-shortcuts key))))))
 
@@ -281,6 +281,16 @@
       (mf/set-ref-val! ref val))
     (mf/ref-val ref)))
 
+;; FIXME: replace with rumext
+(defn use-focus-timer-ref
+  "Returns a ref for scheduling focus timers and disposes any pending
+   timer on component unmount."
+  []
+  (let [ref (mf/use-ref nil)]
+    (mf/with-effect []
+      #(some-> (mf/ref-val ref) ts/dispose!))
+    ref))
+
 ;; FIXME: rename to use-focus-objects
 (defn with-focus-objects
   ([objects]
@@ -438,8 +448,8 @@
        [th-size]
        (when th-size
          (let [node (mf/ref-val rowref)]
-           (.setProperty (.-style node) "--th-width" (str th-size "px"))
-           (.setProperty (.-style node) "--th-height" (str (mth/ceil (* th-size (/ 2 3))) "px")))))
+           (.setProperty (.-style node) "--thumbnail-width" (str th-size "px"))
+           (.setProperty (.-style node) "--thumbnail-height" (str (mth/ceil (* th-size (/ 2 3))) "px")))))
 
      (mf/with-effect []
        (let [node (mf/ref-val rowref)

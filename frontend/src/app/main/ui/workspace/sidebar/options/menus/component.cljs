@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.workspace.sidebar.options.menus.component
   (:require-macros [app.main.style :as stl])
@@ -290,14 +290,18 @@
        get-components-with-duplicated-variant-props-and-values
        (map :main-instance-id)))
 
+(defn- get-variant-option
+  [val]
+  {:id val
+   :label (if (str/blank? val) (str "(" (tr "labels.empty") ")") val)})
+
 (defn- get-variant-options
   "Get variant options for a given property name"
   [prop-name prop-vals]
   (->> (filter #(= (:name %) prop-name) prop-vals)
        first
        :value
-       (mapv (fn [val] {:id val
-                        :label (if (str/blank? val) (str "(" (tr "labels.empty") ")") val)}))))
+       (mapv get-variant-option)))
 
 (mf/defc component-variant-property*
   [{:keys [pos prop options on-prop-name-blur on-prop-value-change on-reorder]}]
@@ -464,11 +468,14 @@
         prop-vals        (mf/with-memo [component-file-data component-page-objects variant-id]
                            (cfv/extract-properties-values component-file-data component-page-objects variant-id))
 
-        get-options
-        (mf/use-fn
-         (mf/deps prop-vals)
-         (fn [prop-name]
-           (get-variant-options prop-name prop-vals)))
+        ;; Per-property options memoized on the identity-stable property values,
+        ;; so select* keeps a stable options prop across renders.
+        options-by-name
+        (mf/with-memo [prop-vals]
+          (reduce (fn [acc prop-name]
+                    (assoc acc prop-name (get-variant-options prop-name prop-vals)))
+                  {}
+                  (into #{} (map :name) props-first)))
 
         select-duplicated-comps
         (mf/use-fn
@@ -523,9 +530,13 @@
      [:div {:class (stl/css :variant-property-list)}
       (for [[pos prop] (map-indexed vector props-first)]
         (let [mixed-value? (not-every? #(= (:value prop) (:value (get % pos))) properties)
-              options      (get-options (:name prop))
-              boolean-pair (ctv/find-boolean-pair (mapv :id options))
-              options      (cond-> options
+              base-options (get options-by-name (:name prop))
+              no-options?  (empty? base-options)
+              boolean-pair (ctv/find-boolean-pair (mapv :id base-options))
+              options      (cond-> base-options
+                             no-options?
+                             (conj (get-variant-option (:value prop)))
+
                              mixed-value?
                              (conj {:id mixed-label :label mixed-label :dimmed true}))]
 
@@ -546,6 +557,7 @@
               [:> select* {:default-selected (if mixed-value? mixed-label (:value prop))
                            :options options
                            :empty-to-end true
+                           :disabled no-options?
                            :on-change (partial switch-component pos)
                            :key (str (:value prop) "-" key)}]])]))]
 

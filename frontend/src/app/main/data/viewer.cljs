@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.data.viewer
   (:require
@@ -44,8 +44,7 @@
    :selected #{}
    :collapsed #{}
    :hover nil
-   :share-id ""
-   :file-comments-users []})
+   :share-id ""})
 
 (declare fetch-comment-threads)
 (declare fetch-bundle)
@@ -77,7 +76,8 @@
                     (if (nil? lstate)
                       default-local-state
                       lstate)))
-          (assoc-in [:viewer-local :share-id] share-id)))
+          (assoc-in [:viewer-local :share-id] share-id)
+          (update :comments-local dcmt/merge-persisted-filters)))
 
     ptk/WatchEvent
     (watch [_ state _]
@@ -95,14 +95,21 @@
       ;; browser just focus the opened tab instead of creating new
       ;; tab.
       (let [name (str "viewer-" file-id)]
-        (unchecked-set ug/global "name" name)))))
+        (unchecked-set ug/global "name" name))
+      ;; Make every `cf/resolve-file-media` call (inspector, code panel,
+      ;; image previews, ...) share-link aware for the lifetime of this
+      ;; viewer. Cleared by `finalize` below.
+      (cf/set-current-share-id! share-id))))
 
 (defn finalize
   [_]
   (ptk/reify ::finalize
     ptk/UpdateEvent
     (update [_ state]
-      (dissoc state :viewer))))
+      (dissoc state :viewer))
+    ptk/EffectEvent
+    (effect [_ _ _]
+      (cf/set-current-share-id! nil))))
 
 ;; --- Data Fetching
 
@@ -222,7 +229,12 @@
     (watch [_ state _]
       (if (and (features/active-feature? state "render-wasm/v1")
                (contains? cf/flags :available-viewer-wasm))
-        (let [objects (dsh/lookup-page-objects state file-id page-id)
+        ;; Fallback matches the viewer UI when the URL omits page-id.
+        (let [page-id (or page-id
+                          (-> (dsh/lookup-file-data state file-id)
+                              :pages
+                              first))
+              objects (dsh/lookup-page-objects state file-id page-id)
 
               shapes
               (reduce-kv
@@ -233,13 +245,12 @@
                []
                objects)
 
-              ;; Creates a stream from the async callback. This stream will only
-              ;; emit one single value after the objects have finished loading
-              ;; in the wasm memory.
+              ;; Positive size required: OffscreenCanvas(0, 0) crashes
+              ;; `_set_render_options` on some browsers.
               set-objects-stream
               (rx/create
                (fn [subs]
-                 (wasm.api/init-canvas-context (js/OffscreenCanvas. 0 0))
+                 (wasm.api/init-canvas-context (js/OffscreenCanvas. 64 64))
                  (wasm.api/set-objects-callback shapes #(rx/push! subs :done))
                  nil))]
 
@@ -315,11 +326,12 @@
                  (filter #(= page-id (:page-id %)))
                  (d/index-by :id)
                  (assoc state :comment-threads)))
-          (on-error [{:keys [type] :as err}]
-            (if (or (= :authentication type)
-                    (= :not-found type))
-              (rx/empty)
-              (rx/throw err)))]
+          (on-error [cause]
+            (let [{:keys [type]} (ex-data cause)]
+              (if (or (= :authentication type)
+                      (= :not-found type))
+                (rx/empty)
+                (rx/throw cause))))]
 
     (ptk/reify ::fetch-comment-threads
       ptk/WatchEvent

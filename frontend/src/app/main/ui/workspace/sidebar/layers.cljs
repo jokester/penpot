@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.workspace.sidebar.layers
   (:require-macros [app.main.style :as stl])
@@ -283,6 +283,7 @@
         search-scope          (:search-scope state)
         current-match-idx     (:current-match-idx state)
         search-input-ref      (mf/use-ref nil)
+        can-edit?             (:can-edit (deref refs/permissions))
 
         clear-search-text
         (mf/use-fn
@@ -431,23 +432,36 @@
         text-match-count  (count text-match-ids)
         safe-match-idx    (if (pos? text-match-count) (mod current-match-idx text-match-count) 0)
 
+        text-match-ids-ref (mf/use-ref text-match-ids)
+        match-idx-ref      (mf/use-ref 0)
+
+        _                  (mf/set-ref-val! text-match-ids-ref text-match-ids)
+
         navigate-next
         (mf/use-fn
-         (mf/deps text-match-count)
+         (mf/deps text-match-ids text-match-count)
          (fn [_]
            (when (pos? text-match-count)
-             (swap! state* update :current-match-idx
-                    (fn [idx]
-                      (mod (inc idx) text-match-count))))))
+             (let [ids      (mf/ref-val text-match-ids-ref)
+                   next-idx (mod (inc (mf/ref-val match-idx-ref)) text-match-count)
+                   id       (nth ids next-idx)]
+               (mf/set-ref-val! match-idx-ref next-idx)
+               (swap! state* assoc :current-match-idx next-idx)
+               (st/emit! (dw/select-shape id)
+                         (dw/center-on-shape id))))))
 
         navigate-prev
         (mf/use-fn
-         (mf/deps text-match-count)
+         (mf/deps text-match-ids text-match-count)
          (fn [_]
            (when (pos? text-match-count)
-             (swap! state* update :current-match-idx
-                    (fn [idx]
-                      (mod (+ (dec idx) text-match-count) text-match-count))))))
+             (let [ids      (mf/ref-val text-match-ids-ref)
+                   prev-idx (mod (+ (dec (mf/ref-val match-idx-ref)) text-match-count) text-match-count)
+                   id       (nth ids prev-idx)]
+               (mf/set-ref-val! match-idx-ref prev-idx)
+               (swap! state* assoc :current-match-idx prev-idx)
+               (st/emit! (dw/select-shape id)
+                         (dw/center-on-shape id))))))
 
         handle-replace
         (mf/use-fn
@@ -570,11 +584,12 @@
                               :aria-label (tr "workspace.sidebar.layers.filter")
                               :on-click on-toggle-filters-click
                               :icon i/filter}]]
-           [:> icon-button* {:variant "ghost"
-                             :aria-pressed find-replace-mode?
-                             :aria-label (tr "workspace.sidebar.layers.search-and-replace")
-                             :on-click toggle-mode
-                             :icon i/menu}]
+           (when can-edit?
+             [:> icon-button* {:variant "ghost"
+                               :aria-pressed find-replace-mode?
+                               :aria-label (tr "workspace.sidebar.layers.search-and-replace")
+                               :on-click toggle-mode
+                               :icon i/menu}])
            [:> icon-button* {:variant "ghost"
                              :aria-label (tr "labels.close")
                              :on-click toggle-search

@@ -2,7 +2,7 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.main.ui.workspace.tokens.management.token-pill
   (:require-macros
@@ -288,16 +288,17 @@
                       :token-pill-no-icon (and (not status-icon?) (not errors?))
                       :token-pill-default can-edit?
                       :token-pill-disabled disabled?
-                      :token-pill-applied (and can-edit? has-selected? (or half-applied? full-applied?))
+                      :token-pill-applied (and can-edit? applied?)
                       :token-pill-invalid (and can-edit? errors?)
-                      :token-pill-invalid-applied (and (or half-applied? full-applied?) errors? can-edit?)
+                      :token-pill-invalid-applied (and applied? errors? can-edit?)
+
                       :token-pill-viewer is-viewer?
-                      :token-pill-applied-viewer (and is-viewer? has-selected?
-                                                      (or half-applied? full-applied?))
+                      :token-pill-applied-viewer (and is-viewer?
+                                                      applied?)
                       :token-pill-invalid-viewer (and is-viewer?
                                                       errors?)
                       :token-pill-invalid-applied-viewer (and is-viewer?
-                                                              (and full-applied? errors?)))
+                                                              applied?))
               :id (str "token-pill-" (:id token))
               :type "button"
               :on-focus on-hover

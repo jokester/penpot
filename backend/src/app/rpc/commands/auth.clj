@@ -2,12 +2,13 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) KALEIDOS INC Sucursal en España SL
+;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
 (ns app.rpc.commands.auth
   (:require
    [app.auth :as auth]
    [app.auth.oidc :as oidc]
+   [app.auth.passwords :as passwords]
    [app.common.data :as d]
    [app.common.exceptions :as ex]
    [app.common.features :as cfeat]
@@ -32,11 +33,9 @@
    [app.rpc.doc :as-alias doc]
    [app.rpc.helpers :as rph]
    [app.setup :as-alias setup]
-   [app.setup.welcome-file :refer [create-welcome-file]]
    [app.storage :as sto]
    [app.tokens :as tokens]
    [app.util.services :as sv]
-   [app.worker :as wrk]
    [cuerdas.core :as str]))
 
 (def schema:password
@@ -182,6 +181,7 @@
               (db/update! conn :profile {:password pwd :is-active true} {:id profile-id})
               nil))]
 
+    (passwords/validate-password password)
     (->> (validate-token token)
          (update-password conn))
 
@@ -240,6 +240,9 @@
               :code :email-as-password
               :hint "you can't use your email as password"))
 
+  ;; Validate password strength against common password dictionary
+  (passwords/validate-password (:password params))
+
   (when (eml/has-bounce-reports? cfg (:email params))
     (ex/raise :type :restriction
               :code :email-has-permanent-bounces
@@ -258,7 +261,8 @@
   (validate-register-attempt! cfg params)
 
   (let [email   (profile/clean-email email)
-        profile (profile/get-profile-by-email pool email)]
+        profile (profile/get-profile-by-email pool email)
+        fullname (d/normalize-string fullname)]
 
     ;; SECURITY: refuse to issue a prepared-register token when an active
     ;; profile already exists for this email.
@@ -302,7 +306,6 @@
    [:fullname ::sm/text]
    [:email ::sm/email]
    [:password schema:password]
-   [:create-welcome-file {:optional true} :boolean]
    [:accept-newsletter-updates {:optional true} :boolean]
    [:invitation-token {:optional true} schema:token]])
 
@@ -359,6 +362,9 @@
         is-active (:is-active params false)
         theme     (:theme params nil)
         email     (str/lower email)
+        fullname  (d/normalize-string (:fullname params))
+        locale    (d/normalize-string locale)
+        theme     (some-> theme d/normalize-string not-empty)
 
         photo-id  (some->> (or (:oidc/picture props)
                                (:google/picture props)
@@ -367,7 +373,7 @@
                            (import-profile-picture cfg))
 
         params    {:id id
-                   :fullname (:fullname params)
+                   :fullname fullname
                    :email email
                    :auth-backend backend
                    :lang locale
@@ -437,7 +443,7 @@
                  :extra-data ptoken}))))
 
 (defn register-profile
-  [{:keys [::db/conn ::wrk/executor] :as cfg} {:keys [token] :as params}]
+  [{:keys [::db/conn] :as cfg} {:keys [token] :as params}]
   (let [claims     (tokens/verify cfg {:token token :iss :prepared-register})
         params     (cond-> claims
                      (:accept-newsletter-updates params)
@@ -460,14 +466,7 @@
                      (tokens/verify cfg {:token token :iss :team-invitation}))
 
         props      (-> (audit/profile->props profile)
-                       (assoc :from-invitation (some? invitation)))
-
-
-        create-welcome-file-when-needed
-        (fn []
-          (when (:create-welcome-file params)
-            (let [cfg (dissoc cfg ::db/conn)]
-              (wrk/submit! executor (create-welcome-file cfg profile)))))]
+                       (assoc :from-invitation (some? invitation)))]
 
     (cond
       ;; When profile is blocked, we just ignore it and return plain data
@@ -516,7 +515,6 @@
                  :email (:email profile)
                  :invitation-token token}
                 (rph/with-transform (session/create-fn cfg profile claims))
-                (rph/with-defer create-welcome-file-when-needed)
                 (rph/with-meta {::audit/replace-props props
                                 ::audit/context {:action "accept-invitation"}
                                 ::audit/profile-id (:id profile)})))
@@ -524,7 +522,6 @@
           (:is-active profile)
           (-> (profile/strip-private-attrs profile)
               (rph/with-transform (session/create-fn cfg profile claims))
-              (rph/with-defer create-welcome-file-when-needed)
               (rph/with-meta
                 {::audit/replace-props props
                  ::audit/context {:action "login"}
@@ -539,7 +536,6 @@
 
             (-> {:id (:id profile)
                  :email (:email profile)}
-                (rph/with-defer create-welcome-file-when-needed)
                 (rph/with-meta
                   {::audit/replace-props props
                    ::audit/context {:action "email-verification"}
