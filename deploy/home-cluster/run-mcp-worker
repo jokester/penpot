@@ -329,7 +329,12 @@ if [[ "$BROWSER" == host ]]; then
     # server started inside penpot-mcp would outlive the worker and keep its
     # ports. Orphans are only visible from inside the container, which makes
     # them genuinely hard to notice.
+    #
+    # The explicit exit is load-bearing for the same reason: without exec the
+    # script keeps going when the browser stops, and the next thing in the file
+    # is the container path -- which would start a SECOND browser.
     node host.js
+    exit $?
 fi
 
 ## ---------------------------------------------------------------- container
