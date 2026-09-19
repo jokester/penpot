@@ -72,6 +72,11 @@ host-only cookie against the same account. Verified on the real stack.
 - A Cloudflare tunnel and an Access application for that hostname.
 - An OIDC client registered in Authelia (`https://id.ihate.work`).
 - Backup storage for one Postgres database and one assets volume.
+- A checkout of this repository on the Docker host. The agent container mounts
+  it read-only; nothing else needs it.
+
+Everything runs in containers. Nothing needs Node, pnpm or a browser installed
+on the host.
 
 ## 4. Register the OIDC client in Authelia
 
@@ -153,30 +158,57 @@ docker compose exec penpot-backend python3 manage.py create-profile \
 Keep this account separate from any human account. It holds a password on disk
 in the agent's browser profile, and separating it bounds the damage.
 
-Then set it up: log in once, create a scratch file, enable MCP under
-Settings > Integrations, and copy the connection URL. Fill all of it into
-`agent/agent.env` (from `agent/agent.env.example`) and run:
+Then set it up: log in once as the agent, create a scratch file, enable MCP
+under Settings > Integrations, and copy the connection URL. Put all of it into
+`agent/agent.env`, copied from `agent/agent.env.example`.
+
+### Run the agent as a container
 
 ```bash
-cd agent
-./host-start.sh --bg     # headless browser holding the file open
-./host-stop.sh           # stops it and releases the profile lock
+docker compose --profile agent up -d penpot-agent
+docker compose logs -f penpot-agent      # ends with "plugin connected"
 ```
 
-The runner drives `mcp/packages/host` from this repo. Its README covers the
-design; the two things that matter here are that the workspace URL needs
-**both** `team-id` and `file-id`, and that `PENPOT_ORIGIN` must be an origin the
-agent's browser trusts, because hardened session cookies are `Secure`.
-`http://localhost` qualifies; a LAN hostname over plain HTTP does not. An agent
-on another machine therefore forwards the port and keeps calling it localhost:
+It is a stock Playwright image with this repo mounted read-only — no build. Two
+things about it are deliberate:
+
+- **The image tag must match** the playwright version in
+  `mcp/packages/host/package.json`, because the mounted `node_modules` supplies
+  the client library and the image supplies the browsers. `PLAYWRIGHT_VERSION`
+  in `.env` sets it. A mismatch fails at launch with a browser-not-found error.
+- **It uses `network_mode: host`.** Hardened session cookies are `Secure`, so
+  the browser keeps them only for a trustworthy origin. `localhost` qualifies;
+  a container hostname such as `penpot-frontend-local` does not, and the cookie
+  is silently dropped — login appears to succeed and nothing works. Sharing the
+  host network namespace lets the agent say `localhost` and mean it. It is
+  therefore not on the `penpot` network and reaches Penpot through the
+  published port.
+
+The browser profile, which holds the session cookie, lives in the
+`penpot_agent_profile` volume. Deleting that volume just forces a fresh login.
+
+### Or run it on the host
+
+`agent/host-start.sh --bg` and `agent/host-stop.sh` do the same thing outside
+Docker. That needs Node 22+, pnpm, and `pnpm exec playwright install chromium`
+in `mcp/packages/host`. Useful when iterating on the host code; the container is
+the right answer for an unattended deployment.
+
+To *watch* it work, `mcp/packages/host/run.sh` runs the browser and an MCP
+server in the foreground with `--headed`, which is worth pointing at a VNC
+desktop when something is behaving oddly. Its README covers the switches.
+
+Either way, the workspace URL needs **both** `team-id` and `file-id`, and an
+MCP client connects to the `PENPOT_MCP_URL` from `agent/agent.env`. That
+`userToken` is a secret granting `execute_code` against whatever file the agent
+holds open; it does not expire, and regenerating it deletes the old one.
+
+An agent on a *different* machine from Penpot forwards the port and keeps
+calling it localhost, for the same trustworthy-origin reason:
 
 ```bash
 ssh -N -L 9001:127.0.0.1:9001 <penpot-host>
 ```
-
-An MCP client then connects to the `PENPOT_MCP_URL` in that file. The
-`userToken` in it is a secret granting `execute_code` against whatever file the
-agent holds open; it does not expire, and regenerating it deletes the old one.
 
 ## 8. Verify, in this order
 
@@ -196,7 +228,8 @@ Each step fails differently, so do not skip ahead.
 5. Log in and check `Set-Cookie` carries `Secure; HttpOnly` and **no**
    `Domain`.
 6. Settings → Integrations → enable MCP, and copy the connection URL.
-7. `cd agent && ./host-start.sh --bg` → the log ends with
+7. `docker compose --profile agent up -d penpot-agent`, then
+   `docker compose logs penpot-agent` → ends with
    `plugin connected to ws://localhost:9001/mcp/ws`.
 
 ## 9. Ports and endpoints, as measured
@@ -325,9 +358,9 @@ frontends render the correct `PENPOT_PUBLIC_URI` and flag sets; the hardened
 `Secure` cookie is accepted over `http://localhost` (Chromium treats loopback
 as a trustworthy origin); `manage.py` account creation; agent login; and the
 full MCP path — `execute_code`, `high_level_overview`, `penpot_api_info` and
-`export_shape` — driving a file with no human tab open, started through
-`agent/host-start.sh`. The port table in section 9 was read from the running
-containers, not inferred.
+`export_shape` — driving a file with no human tab open, run both from
+`agent/host-start.sh` on the host and from the `penpot-agent` container. The
+port table in section 9 was read from the running containers, not inferred.
 
 **Not tested**: the Cloudflare tunnel, the Access policy, and the Authelia OIDC
 round trip. The Authelia endpoint URLs were read from the live discovery

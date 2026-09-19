@@ -100,6 +100,31 @@ the page loads, authenticates and opens its websockets, but `team-container*`
 renders nothing and the plugin never starts — a blank page with a clean
 console.
 
+## Watching it work: `run.sh`
+
+`host.js` runs the browser; `run.sh` runs the browser **and** an MCP server
+together in the foreground, which is what you want when observing rather than
+deploying. Ctrl-C stops both.
+
+    ./run.sh --env-file <env> --mcp builtin --headed
+    ./run.sh --env-file <env> --mcp local --multi-user --host 0.0.0.0 --port 4501
+
+`--mcp builtin` starts no server and lets the plugin use the one the instance
+already serves. `--mcp local` starts the build in `../server/dist` and injects
+its address, which is the mode to use when hacking on the server itself;
+`--host`, `--port` and `--ws-port` only mean anything there.
+
+It starts the server from the directory holding `index.js`, because
+`ConfigurationLoader` resolves `data/` against `process.cwd()`. It also checks
+the plugin the instance serves against the server build and warns when they are
+skewed, since that mismatch reports itself as a suspended browser tab.
+
+`--headed` needs a DISPLAY you are authorised on, so run it from inside the VNC
+session or export that session's `DISPLAY` **and** `XAUTHORITY`. When the cookie
+does not match, Playwright reports only "Target page, context or browser has
+been closed" with empty browser logs; the real message is on the browser's
+stderr, `Authorization required, but no authorization protocol specified`.
+
 ## Configuration
 
 | Variable                    | Description                         | Default                            |

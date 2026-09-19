@@ -23,6 +23,7 @@ networks:
 volumes:
   penpot_postgres_v15:
   penpot_assets:
+  penpot_agent_profile:
 
 services:
   ## ---------------------------------------------------------------- frontends
@@ -205,6 +206,38 @@ services:
     ports:
       - "${PENPOT_MAILCATCH_BIND}:${PENPOT_MAILCATCH_PORT}:1080"
     networks: [penpot]
+
+  ## The headless MCP agent, inert unless started with `--profile agent`.
+  ##
+  ## A stock Playwright image with this repo mounted -- no build. Its tag must
+  ## match the playwright version in mcp/packages/host/package.json, because the
+  ## mounted node_modules supplies the client and the image supplies the
+  ## browsers.
+  ##
+  ## network_mode: host is not laziness. Hardened session cookies are Secure, so
+  ## the browser only keeps them for a trustworthy origin; localhost qualifies
+  ## and a container hostname like penpot-frontend-local does not. Sharing the
+  ## host's network namespace lets the agent say localhost and mean it. It is
+  ## therefore NOT on the penpot network and reaches Penpot through the
+  ## published port, so PENPOT_BIND must stay reachable on loopback.
+  penpot-agent:
+    image: "mcr.microsoft.com/playwright:v${PLAYWRIGHT_VERSION}-noble"
+    restart: always
+    profiles: [agent]
+    network_mode: host
+    working_dir: /repo/mcp/packages/host
+    env_file: [agent/agent.env]
+    environment:
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+      # Inside the container the profile lives on the named volume below, not
+      # in the operator's home directory.
+      PENPOT_PROFILE_DIR: /profile
+    volumes:
+      - "${PENPOT_SRC:-../..}:/repo:ro"
+      - penpot_agent_profile:/profile
+    # Log in if the stored session is gone, then hold the file open.
+    command: >-
+      bash -lc "node spikes/login.js && node host.js"
 
   ## Optional tunnel, inert unless started with `--profile tunnel`. Reaches the
   ## public frontend over the compose network, so PENPOT_BIND can stay closed
