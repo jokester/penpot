@@ -11,18 +11,38 @@ touches Cloudflare.
 ## 1. Shape of the thing
 
 ```
-                 ┌─ people ──────────────────────────────────┐
-browser ──▶ Cloudflare Access ──▶ cloudflared ──▶ penpot-frontend-public :9002
-              (GitHub / Authelia)                      │
-                                                       ├──▶ penpot-backend  :6060
-ssh -L ──▶ 127.0.0.1:9001 ──▶ penpot-frontend-local ───┤     penpot-exporter :6061
-                 └─ agent ────────────────────────────┘     penpot-mcp  :4401/:4402
-                                                            postgres / valkey
+people                                                      shared backend
+  browser ─▶ Cloudflare Access ─▶ cloudflared ─▶ frontend-public :9002 ─┐
+               GitHub / Authelia                                        │
+                                                                        ├─▶ backend  :6060
+agent                                                                   │   exporter :6061
+  headless browser ────────────────────────────▶ frontend-local :9001 ──┘   mcp :4401 :4402
+  MCP client ─────────────────────────────────▶ same, /mcp/stream           postgres / valkey
 ```
 
-**Nothing binds to `0.0.0.0`.** Every published port is on `127.0.0.1`.
-Cloudflare Access protects nothing if the origin answers directly, so the
-tunnel is the only way in from outside.
+### Connect exactly one thing to the internet
+
+| | |
+| --- | --- |
+| **service** | `penpot-frontend-public` |
+| **host** | the Docker host running this compose file |
+| **port** | `${PENPOT_PUBLIC_PORT}`, default **9002** (container port 8080) |
+| **protocol** | plain HTTP; Cloudflare terminates TLS |
+| **health check** | `GET /readyz` |
+
+Point the Cloudflare tunnel at `http://<this-host>:9002` and put the Access
+policy on the hostname. If `cloudflared` runs as a container here instead, use
+`--profile tunnel` and it reaches `http://penpot-frontend-public:8080` over the
+compose network, needing no published port at all.
+
+**Nothing else goes to the tunnel.** Not `penpot-frontend-local` (port 9001,
+the agent path, no Access in front of it), and above all not the mail catcher,
+whose web UI lists every password-reset link the instance sends.
+
+The frontends bind `${PENPOT_BIND}`, `0.0.0.0` by default, so an ingress or an
+agent on another host can reach them. That also means **anything on the LAN
+reaches port 9002 without passing Cloudflare Access**. On a network where that
+matters, set `PENPOT_BIND=127.0.0.1` and run cloudflared on this host.
 
 ## 2. Why there are two frontends
 
@@ -35,10 +55,9 @@ the API, the notifications socket, the worker, and the MCP socket
 nginx origin, so it cannot be split by path either.
 
 One value cannot be both `https://penpot.example.org` and
-`http://localhost:9001`. Set it to the public host and the agent — reaching the
-app through an SSH forward — still dials the public hostname, lands on
-Cloudflare Access, and fails with no credential. So each audience gets its own
-nginx. They are cheap: static assets and a config file.
+`http://localhost:9001`. Set it to the public host and the agent still dials
+that hostname, lands on Cloudflare Access, and fails with no credential. So
+each audience gets its own nginx. They are cheap: static assets and a config file.
 
 The **backend** keeps the public URI, because that is what belongs in emails
 and in the OIDC `redirect_uri`.
@@ -134,21 +153,51 @@ docker compose exec penpot-backend python3 manage.py create-profile \
 Keep this account separate from any human account. It holds a password on disk
 in the agent's browser profile, and separating it bounds the damage.
 
+Then set it up: log in once, create a scratch file, enable MCP under
+Settings > Integrations, and copy the connection URL. Fill all of it into
+`agent/agent.env` (from `agent/agent.env.example`) and run:
+
+```bash
+cd agent
+./host-start.sh --bg     # headless browser holding the file open
+./host-stop.sh           # stops it and releases the profile lock
+```
+
+The runner drives `mcp/packages/host` from this repo. Its README covers the
+design; the two things that matter here are that the workspace URL needs
+**both** `team-id` and `file-id`, and that `PENPOT_ORIGIN` must be an origin the
+agent's browser trusts, because hardened session cookies are `Secure`.
+`http://localhost` qualifies; a LAN hostname over plain HTTP does not. An agent
+on another machine therefore forwards the port and keeps calling it localhost:
+
+```bash
+ssh -N -L 9001:127.0.0.1:9001 <penpot-host>
+```
+
+An MCP client then connects to the `PENPOT_MCP_URL` in that file. The
+`userToken` in it is a secret granting `execute_code` against whatever file the
+agent holds open; it does not expire, and regenerating it deletes the old one.
+
 ## 8. Verify, in this order
 
 Each step fails differently, so do not skip ahead.
 
-1. `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9001/` → `200`.
+1. `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9002/readyz` → `200`.
+   This is the endpoint the tunnel health-checks.
 2. `curl -s http://127.0.0.1:9002/js/config.js | grep penpotPublicURI`
-   → the **public** URI. Same on `:9001` → `http://localhost:9001`.
+   → the **public** URI. Same on `:9001` → `PENPOT_LOCAL_URI`.
    If these are identical, the two-frontend split is broken; see section 2.
 3. Browse the public hostname. Access challenges, then Authelia, then Penpot
    loads with **no password form**.
-4. SSH-forward `9001` and log in as the agent with its password. The password
-   form **is** present here.
+4. Open `http://localhost:9001` on the Penpot host — or SSH-forward 9001 from
+   elsewhere — and log in as the agent with its password. The password form
+   **is** present here. It must be `localhost`: a LAN hostname over plain HTTP
+   is not a trustworthy origin and the `Secure` session cookie is dropped.
 5. Log in and check `Set-Cookie` carries `Secure; HttpOnly` and **no**
    `Domain`.
 6. Settings → Integrations → enable MCP, and copy the connection URL.
+7. `cd agent && ./host-start.sh --bg` → the log ends with
+   `plugin connected to ws://localhost:9001/mcp/ws`.
 
 ## 9. Ports and endpoints, as measured
 
@@ -157,8 +206,8 @@ Audited on a stack built from this file, 2026-09-18. Docker's embedded DNS
 
 | service | listens on | bound to | published to host |
 | --- | --- | --- | --- |
-| penpot-frontend-public | 8080 | container network | `127.0.0.1:9002` |
-| penpot-frontend-local | 8080 | container network | `127.0.0.1:9001` |
+| **penpot-frontend-public** | 8080 | container network | **`${PENPOT_BIND}:9002`** ← the tunnel target |
+| penpot-frontend-local | 8080 | container network | `${PENPOT_BIND}:9001` (agent only) |
 | penpot-backend | 6060 | container network | no |
 | penpot-backend | 6063 (PREPL) | **127.0.0.1 inside its own container** | no |
 | penpot-exporter | 6061 | container network | no |
@@ -168,8 +217,10 @@ Audited on a stack built from this file, 2026-09-18. Docker's embedded DNS
 | penpot-valkey | 6379 | container network | no |
 | penpot-mailcatch | 1025, 1080 | container network | `127.0.0.1:1080` |
 
-Only the two nginx ports and the mail catcher reach the host, all on loopback.
-Only `penpot-frontend-public` is meant to reach the tunnel.
+Only the two nginx ports and the mail catcher reach the host. The frontends
+follow `PENPOT_BIND` (`0.0.0.0` by default); the mail catcher has its own bind
+and stays on loopback. Only `penpot-frontend-public` is meant to reach the
+tunnel.
 
 PREPL is better protected than it first appears: it binds loopback *inside* the
 backend container, so no other container can reach it either.
@@ -274,8 +325,9 @@ frontends render the correct `PENPOT_PUBLIC_URI` and flag sets; the hardened
 `Secure` cookie is accepted over `http://localhost` (Chromium treats loopback
 as a trustworthy origin); `manage.py` account creation; agent login; and the
 full MCP path — `execute_code`, `high_level_overview`, `penpot_api_info` and
-`export_shape` — driving a file with no human tab open. The port table in
-section 9 was read from the running containers, not inferred.
+`export_shape` — driving a file with no human tab open, started through
+`agent/host-start.sh`. The port table in section 9 was read from the running
+containers, not inferred.
 
 **Not tested**: the Cloudflare tunnel, the Access policy, and the Authelia OIDC
 round trip. The Authelia endpoint URLs were read from the live discovery

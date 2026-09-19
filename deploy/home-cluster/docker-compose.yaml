@@ -27,16 +27,17 @@ volumes:
 services:
   ## ---------------------------------------------------------------- frontends
 
-  # Public: reached only through the Cloudflare tunnel. Never publish this port
-  # to 0.0.0.0 -- Cloudflare Access is worthless if the origin is reachable
-  # directly. Published on loopback so cloudflared on the host can reach it;
-  # drop the ports block entirely if cloudflared runs as a container on this
-  # network and targets penpot-frontend-public:8080.
+  # Public: THIS is the service the Cloudflare tunnel connects to. It binds
+  # ${PENPOT_BIND} so an ingress on another host can reach it.
+  #
+  # Anything that can reach this port skips Cloudflare Access, so on a shared
+  # LAN the gate is only as good as the network. Set PENPOT_BIND=127.0.0.1 and
+  # run cloudflared on this host if you want that closed.
   penpot-frontend-public:
     image: "penpotapp/frontend:${PENPOT_VERSION}"
     restart: always
     ports:
-      - "127.0.0.1:${PENPOT_PUBLIC_PORT}:8080"
+      - "${PENPOT_BIND}:${PENPOT_PUBLIC_PORT}:8080"
     volumes:
       - penpot_assets:/opt/data/assets
     depends_on: [penpot-backend, penpot-exporter, penpot-mcp]
@@ -52,14 +53,19 @@ services:
       PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "${PENPOT_MAX_BODY}"
       PENPOT_HTTP_SERVER_MAX_MULTIPART_BODY_SIZE: "${PENPOT_MAX_BODY}"
 
-  # Private: the SSH-forward target. Cloudflare is not in this path at all, so
-  # OIDC is hidden here (its redirect_uri points at the public host and cannot
-  # come back to loopback) and the password form is shown for the agent account.
+  # Agent path: no Cloudflare anywhere in it. OIDC is hidden here (its
+  # redirect_uri points at the public host and cannot come back here) and the
+  # password form is shown, because the agent logs in with a password.
+  #
+  # PENPOT_LOCAL_URI must be an origin the agent's BROWSER considers
+  # trustworthy, because session cookies carry Secure once hardened. localhost
+  # qualifies over plain http; a LAN hostname does not. An agent on another
+  # machine therefore SSH-forwards this port and still calls it localhost.
   penpot-frontend-local:
     image: "penpotapp/frontend:${PENPOT_VERSION}"
     restart: always
     ports:
-      - "127.0.0.1:${PENPOT_LOCAL_PORT}:8080"
+      - "${PENPOT_BIND}:${PENPOT_LOCAL_PORT}:8080"
     volumes:
       - penpot_assets:/opt/data/assets
     depends_on: [penpot-backend, penpot-exporter, penpot-mcp]
@@ -69,7 +75,7 @@ services:
         ${PENPOT_FLAGS_BASE}
         disable-login-with-oidc
         enable-login-with-password
-      PENPOT_PUBLIC_URI: "http://localhost:${PENPOT_LOCAL_PORT}"
+      PENPOT_PUBLIC_URI: "${PENPOT_LOCAL_URI}"
       PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "${PENPOT_MAX_BODY}"
       PENPOT_HTTP_SERVER_MAX_MULTIPART_BODY_SIZE: "${PENPOT_MAX_BODY}"
 
@@ -189,12 +195,25 @@ services:
       - VALKEY_EXTRA_FLAGS=--maxmemory 128mb --maxmemory-policy volatile-lfu
 
   ## Mail catcher. Its web UI shows EVERY message the instance sends, including
-  ## password-reset links, so it is bound to loopback and must stay that way.
-  ## Reach it over the SSH forward, never through the tunnel.
+  ## password-reset links, so whoever opens it can take over any account. It has
+  ## its own bind address, defaulting to loopback, and should keep it. Never
+  ## route it through the tunnel.
   penpot-mailcatch:
     image: sj26/mailcatcher:latest
     restart: always
     expose: ['1025']
     ports:
-      - "127.0.0.1:${PENPOT_MAILCATCH_PORT}:1080"
+      - "${PENPOT_MAILCATCH_BIND}:${PENPOT_MAILCATCH_PORT}:1080"
+    networks: [penpot]
+
+  ## Optional tunnel, inert unless started with `--profile tunnel`. Reaches the
+  ## public frontend over the compose network, so PENPOT_BIND can stay closed
+  ## when this is used. Create the tunnel in Cloudflare first and put its token
+  ## in CLOUDFLARED_TOKEN.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: always
+    profiles: [tunnel]
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARED_TOKEN:-}
+    depends_on: [penpot-frontend-public]
     networks: [penpot]
