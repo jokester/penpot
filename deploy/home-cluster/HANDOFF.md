@@ -148,8 +148,15 @@ and login dies after the redirect.
 Two kinds, created two ways.
 
 **People** log in through Authelia and are provisioned on first login, thanks
-to `enable-oidc-registration`. Nothing to do in advance; registration is
-disabled, so SSO is the only way in.
+to `enable-oidc-registration`. Nothing to do in advance.
+
+`disable-registration` closes the public signup form, and only that: the check
+lives in the RPC path (`validate-register-attempt!`), so SSO is the only door
+**from outside**. It is not the only door. `manage.py` reaches the backend over
+PREPL and calls `create-profile` directly, never passing that check, which is
+how worker accounts get made on a locked-down instance. PREPL binds loopback
+inside the backend container, so that door opens only to whoever can already
+`docker compose exec` — who has the database anyway.
 
 **Workers** are ordinary Penpot accounts that happen to have a password,
 because their login is non-interactive. Keep them separate from your own: the
