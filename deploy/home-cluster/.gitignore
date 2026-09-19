@@ -1,6 +1,7 @@
 # Real configuration: secrets, hostnames, tokens. Only the examples are tracked.
 .env
-worker/worker.env
+worker/*.env
+!worker/*.env.example
 worker/worker.log
 worker/worker.pid
 __pycache__/

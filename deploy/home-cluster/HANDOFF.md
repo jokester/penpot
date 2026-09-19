@@ -143,11 +143,18 @@ cluster has no internal route to Authelia, set it equal to
 listed in `PENPOT_SSRF_ALLOWED_HOSTS`, or the backend refuses the token call
 and login dies after the redirect.
 
-## 7. Create the worker account
+## 7. Accounts: people and workers
 
-Registration is disabled, so accounts are made on the command line. People get
-theirs automatically on first SSO login (`enable-oidc-registration`); the MCP
-worker needs a password, because its login is non-interactive.
+Two kinds, created two ways.
+
+**People** log in through Authelia and are provisioned on first login, thanks
+to `enable-oidc-registration`. Nothing to do in advance; registration is
+disabled, so SSO is the only way in.
+
+**Workers** are ordinary Penpot accounts that happen to have a password,
+because their login is non-interactive. Keep them separate from your own: the
+password and an MCP token sit on disk, and a separate account bounds what a
+leak reaches. It also keeps the audit trail honest about who drew what.
 
 "Worker" rather than "agent" throughout: the worker is the browser that hosts
 Penpot's MCP plugin and executes what arrives over the transport. Whatever
@@ -155,17 +162,29 @@ connects to the other end is usually an LLM agent, and calling both the same
 thing makes every sentence ambiguous.
 
 ```bash
-docker compose exec penpot-backend python3 manage.py create-profile \
-  -n "MCP Worker" -e worker@penpot.local -p '<strong password>' \
-  --skip-tutorial --skip-walkthrough
+./provision-worker --email worker-a@penpot.local
 ```
 
-Keep this account separate from any human account. It holds a password on disk
-in the worker's browser profile, and separating it bounds the damage.
+That creates the profile, enables MCP, mints its token, dismisses onboarding,
+makes a scratch file, and writes `worker/worker-a.env` with a generated
+password. Repeat it per worker; each gets its own env file, and the launcher
+lists them all under Account.
 
-Then set it up: log in once as the worker, create a scratch file, enable MCP
-under Settings > Integrations, and copy the connection URL. Put all of it into
-`worker/worker.env`, copied from `worker/worker.env.example`.
+### Letting a worker into your documents
+
+A fresh worker sees only its own scratch project. To let it work on your files,
+invite it into your team from Penpot (Team > Invitations, role Editor), copy
+the invitation link, and hand it over:
+
+```bash
+./provision-worker --email worker-a@penpot.local --invite '<link or token>'
+```
+
+The worker accepts the invitation itself, so the only manual step is the invite
+you would make for any collaborator. Afterwards the launcher lists that team's
+documents alongside its own, and a worker driving a file in someone else's team
+needs **both** ids in the workspace URL — the launcher passes `--team-id` as
+well as `--file-id` for exactly this reason.
 
 ### Run the worker as a container
 
@@ -417,7 +436,10 @@ as a trustworthy origin); `manage.py` account creation; worker login; and the
 full MCP path — `execute_code`, `high_level_overview`, `penpot_api_info` and
 `export_shape` — driving a file with no human tab open, run both from
 `worker/worker-start.sh` on the host and from the `penpot-mcp-worker`
-container, and `run-mcp-worker --headed` was driven on a VNC display. The
+container, and `run-mcp-worker --headed` was driven on a VNC display. Two
+documents were driven at once through separate servers, and a second worker
+account created by `provision-worker` joined another account's team from an
+invitation and wrote into that team's file. The
 port table in section 9 was read from the running containers, not inferred.
 
 **Not tested**: the Cloudflare tunnel, the Access policy, and the Authelia OIDC

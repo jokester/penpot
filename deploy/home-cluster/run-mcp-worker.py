@@ -155,33 +155,59 @@ def fetch_documents(env):
         if not match:
             return [], "login returned no auth-token cookie"
         cookie = match.group(1)
-        team_id = profile.get("defaultTeamId")
-        files, _ = rpc(origin, "get-team-recent-files", {"teamId": team_id}, cookie)
-        found = [
-            (f"{f.get('name', '(unnamed)')}  {str(f.get('id'))[:8]}", str(f.get("id")))
-            for f in files
-            if f.get("id")
-        ]
-        return sorted(found), "" if found else "the account has no files yet"
+
+        # Every team the worker belongs to, not just its own: a worker invited
+        # into someone else's team drives documents that live there, and the
+        # workspace URL needs that team's id as well as the file's.
+        teams, _ = rpc(origin, "get-teams", {}, cookie)
+        if not teams:
+            teams = [{"id": profile.get("defaultTeamId"), "name": "default"}]
+        found = []
+        for team in teams:
+            team_id = str(team.get("id"))
+            label_team = team.get("name") or team_id[:8]
+            try:
+                files, _ = rpc(origin, "get-team-recent-files", {"teamId": team_id}, cookie)
+            except (urllib.error.URLError, OSError, ValueError):
+                continue
+            for f in files or []:
+                if f.get("id"):
+                    found.append(
+                        (f"{f.get('name', '(unnamed)')}  [{label_team}]", str(f["id"]), team_id)
+                    )
+        # Teams are commonly all called "Default", so add a short id when the
+        # name alone would not say which team a document lives in. The TAIL of
+        # the id, not the head: Penpot's uuids are time-ordered, so teams made
+        # moments apart share a prefix and only differ at the end.
+        if len({t.get("name") for t in teams}) < len(teams):
+            found = [
+                (label.rstrip("]") + f" \u2026{team_id[-8:]}]", file_id, team_id)
+                for label, file_id, team_id in found
+            ]
+        return sorted(found), "" if found else "no files in any team this account belongs to"
     except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
         return [], f"could not list documents: {str(exc)[:60]}"
 
 
 def document_choices(state):
-    labels = [label for label, _ in DOCUMENTS]
+    labels = [entry[0] for entry in DOCUMENTS]
     current = state["document"]
     if current and current not in labels:
         labels.append(current)
     return labels or [current or ""]
 
 
-def document_id(state):
-    """The file id the current Document answer names, or None."""
-    for label, file_id in DOCUMENTS:
+def document_ids(state):
+    """(file-id, team-id) for the current Document answer; team may be None."""
+    for label, file_id, team_id in DOCUMENTS:
         if label == state["document"]:
-            return file_id
+            return file_id, team_id
     match = UUID_RE.search(state["document"])
-    return match.group(0) if match else None
+    return (match.group(0) if match else None), None
+
+
+def document_id(state):
+    return document_ids(state)[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -222,9 +248,11 @@ def problems(state):
 
 def build_command(state):
     argv = [str(RUNNER), "--env-file", str(WORKER_DIR / state["env"]), "--mcp", state["mode"]]
-    file_id = document_id(state)
+    file_id, team_id = document_ids(state)
     if file_id:
         argv += ["--file-id", file_id]
+    if team_id:
+        argv += ["--team-id", team_id]
     if state["port"].strip() and state["mode"] != "builtin":
         argv += ["--port", state["port"].strip()]
     argv.append("--headed" if state["headed"] == "yes" else "--headless")
@@ -368,9 +396,8 @@ class Form:
                 self.cycle(key, -1)
             elif key == "document" and isinstance(char, str) and char.isprintable():
                 # Documents can also be typed, for a file not in the list.
-                self.state[key] = char if self.state[key] in dict(
-                    (l, i) for l, i in DOCUMENTS
-                ) else self.state[key] + char
+                known = {entry[0] for entry in DOCUMENTS}
+                self.state[key] = char if self.state[key] in known else self.state[key] + char
             elif key == "document" and char in (curses.KEY_BACKSPACE, "\x7f", "\b"):
                 self.state[key] = self.state[key][:-1]
         elif char in (curses.KEY_BACKSPACE, "\x7f", "\b"):
@@ -424,7 +451,7 @@ class Form:
 def refresh_documents(state):
     global DOCUMENTS, DOC_ERROR
     DOCUMENTS, DOC_ERROR = fetch_documents(read_env(state["env"]))
-    labels = [label for label, _ in DOCUMENTS]
+    labels = [entry[0] for entry in DOCUMENTS]
     if labels and state["document"] not in labels and not UUID_RE.search(state["document"]):
         state["document"] = labels[0]
 

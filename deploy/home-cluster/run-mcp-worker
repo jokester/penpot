@@ -29,6 +29,7 @@ MULTI_USER=false
 REPL=false
 ENV_FILE="$HERE/worker/worker.env"
 FILE_ID=""
+TEAM_ID=""
 PROFILE_DIR=""
 
 usage() {
@@ -60,6 +61,10 @@ Document and browser:
   --file-id UUID     Drive this file instead of the one in the env file. Also
                      gives the browser its own profile, so several workers do
                      not fight over one profile directory.
+  --team-id UUID     The team that file belongs to. Needed whenever the file is
+                     not in the team named by the env file -- a shared team the
+                     worker was invited to, for instance. A workspace URL
+                     carrying the wrong team renders nothing.
   --profile DIR      Browser profile directory (overrides the above).
   --headed           Show the browser. Needs a DISPLAY you are authorised on;
                      run it from inside the VNC session, or export that
@@ -80,6 +85,7 @@ while [[ $# -gt 0 ]]; do
         --ws-port)  WS_PORT="$2"; shift 2 ;;
         --ws-uri)   WS_URI="$2"; shift 2 ;;
         --file-id)  FILE_ID="$2"; shift 2 ;;
+        --team-id)  TEAM_ID="$2"; shift 2 ;;
         --profile)  PROFILE_DIR="$2"; shift 2 ;;
         --headed)   HEADLESS=false; shift ;;
         --headless) HEADLESS=true; shift ;;
@@ -104,6 +110,9 @@ set -a; source "$ENV_FILE"; set +a
 if [[ -n "$FILE_ID" ]]; then
     PENPOT_FILE_URL="$(sed -E "s/file-id=[0-9a-fA-F-]+/file-id=$FILE_ID/" <<<"$PENPOT_FILE_URL")"
     [[ -z "$PROFILE_DIR" ]] && PROFILE_DIR="$HOME/.cache/penpot-headless/profile-${FILE_ID:0:8}"
+fi
+if [[ -n "$TEAM_ID" ]]; then
+    PENPOT_FILE_URL="$(sed -E "s/team-id=[0-9a-fA-F-]+/team-id=$TEAM_ID/" <<<"$PENPOT_FILE_URL")"
 fi
 [[ -n "$PROFILE_DIR" ]] && export PENPOT_PROFILE_DIR="$PROFILE_DIR"
 export PENPOT_FILE_URL
