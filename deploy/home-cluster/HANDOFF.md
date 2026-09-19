@@ -24,7 +24,7 @@ worker                                                                  │   ex
 
 | | |
 | --- | --- |
-| **service** | `penpot-frontend-public` |
+| **service** | `penpot-frontend` |
 | **host** | the Docker host running this compose file |
 | **port** | `${PENPOT_PUBLIC_PORT}`, default **9002** (container port 8080) |
 | **protocol** | plain HTTP; Cloudflare terminates TLS |
@@ -34,35 +34,73 @@ Point the Cloudflare tunnel at `http://<this-host>:9002` and put the Access
 policy on the hostname. Running the tunnel is out of scope for this file — it
 belongs to whatever manages the cluster's ingress, not to Penpot.
 
-**Nothing else goes to the tunnel.** Not `penpot-frontend-local` (port 9001,
-the worker path, no Access in front of it), and above all not the mail catcher,
-whose web UI lists every password-reset link the instance sends.
+**Nothing else goes to the tunnel.** The same container also publishes port
+9001, the worker path, on loopback only and with no Access in front of it — that
+one must stay private. And above all not the mail catcher, whose web UI lists
+every password-reset link the instance sends.
 
-The frontends bind `${PENPOT_BIND}`, `0.0.0.0` by default, so an ingress or an
-worker on another host can reach them. That also means **anything on the LAN
-reaches port 9002 without passing Cloudflare Access**. On a network where that
-matters, set `PENPOT_BIND=127.0.0.1` and run cloudflared on this host.
+Port 9002 binds `${PENPOT_BIND}`, `0.0.0.0` by default, so an ingress on another
+host can reach it. That also means **anything on the LAN reaches port 9002
+without passing Cloudflare Access**. On a network where that matters, set
+`PENPOT_BIND=127.0.0.1` and run cloudflared on this host. Port 9001 is pinned to
+`127.0.0.1` regardless.
 
-## 2. Why there are two frontends
+## 2. Why one frontend serves two origins
 
-This is the one piece of the design that looks redundant and is not.
+This deployment used to run two frontend containers, one per origin. It does
+not any more, and the reason is worth recording because the old rationale looks
+compelling and is incomplete.
 
-The frontend container bakes `PENPOT_PUBLIC_URI` into `js/config.js` when it
-starts, and every URL the running app dials derives from that single value —
-the API, the notifications socket, the worker, and the MCP socket
-(`frontend/src/app/config.cljs:185`). Penpot also serves all of it from one
-nginx origin, so it cannot be split by path either.
+The frontend entrypoint bakes `PENPOT_PUBLIC_URI` into `js/config.js` at
+startup, and every URL the running app dials derives from that single value —
+the API, the notifications socket, the render worker, and the MCP socket
+(`frontend/src/app/config.cljs:185`). One value cannot be both
+`https://penpot.example.org` and `http://localhost:9001`, so it looked as
+though each audience needed its own nginx.
 
-One value cannot be both `https://penpot.example.org` and
-`http://localhost:9001`. Set it to the public host and the worker still dials
-that hostname, lands on Cloudflare Access, and fails with no credential. So
-each audience gets its own nginx. They are cheap: static assets and a config file.
+It does not, because the variable can simply be left unset. The entrypoint
+writes the line only when it is non-empty:
 
-The **backend** keeps the public URI, because that is what belongs in emails
-and in the OIDC `redirect_uri`.
+```bash
+if [ -n "$PENPOT_PUBLIC_URI" ]; then
+    echo "var penpotPublicURI = \"$PENPOT_PUBLIC_URI\";" >> "$1";
+fi
+```
 
-The session cookie carries no `Domain` attribute, so each origin gets its own
-host-only cookie against the same account. Verified on the real stack.
+and `app.config/public-uri` falls back to the browser's own origin when it is
+absent (`frontend/src/app/config.cljs:181`):
+
+```clj
+(def public-uri
+  (normalize-uri (or (obj/get global "penpotPublicURI")
+                     (obj/get location "origin"))))
+```
+
+So the app configures itself per request, from the origin the browser actually
+arrived on, and `mcp-ws-uri` follows. nginx is `server_name _`, so the Host
+header does not matter either. One container publishes 8080 twice: 9002 for the
+public hostname and 9001 on loopback for the worker.
+
+Verified, not assumed: a frontend with no `PENPOT_PUBLIC_URI` served
+`js/config.js` with no origin line, proxied RPC normally, and a worker drove a
+real document through it end to end.
+
+Two consequences:
+
+- **The Cloudflare cache trap in section 13 is gone.** `js/config.js` no longer
+  differs by origin, so an edge cache cannot serve the wrong one. Keeping the
+  bypass rule costs nothing and is still advisable on principle.
+- **Flags are now shared.** The old split gave the public origin
+  `disable-login-with-password` and the worker origin
+  `enable-login-with-password`; merged, both show the password form. That is
+  cosmetic in both directions — the backend always accepts passwords, which is
+  how the worker logs in, and Cloudflare Access is the real gate on 9002.
+
+The **backend** keeps its own `PENPOT_PUBLIC_URI`. That one is load-bearing: it
+builds email links and the OIDC `redirect_uri`, which must name the public host.
+
+The session cookie carries no `Domain` attribute, so each origin still gets its
+own host-only cookie against the same account.
 
 ## 3. What you must provide
 
@@ -200,30 +238,27 @@ documents alongside its own, and a worker driving a file in someone else's team
 needs **both** ids in the workspace URL — the launcher passes `--team-id` as
 well as `--file-id` for exactly this reason.
 
-### Run the worker as a container
+### Running the worker unattended
 
-```bash
-docker compose --profile worker up -d penpot-mcp-worker
-docker compose logs -f penpot-mcp-worker    # ends with "plugin connected"
-```
+There is no worker container any more. `run-mcp-worker` on the host is the only
+path, which is what has actually been used throughout; the compose service was
+removed rather than left as a second, untested way to do the same thing.
 
-It is a stock Playwright image with this repo mounted read-only — no build. Two
-things about it are deliberate:
+Two things it relied on are worth keeping in mind if you ever reinstate it:
 
-- **The image tag must match** the playwright version in
-  `mcp/packages/host/package.json`, because the mounted `node_modules` supplies
-  the client library and the image supplies the browsers. `PLAYWRIGHT_VERSION`
-  in `.env` sets it. A mismatch fails at launch with a browser-not-found error.
-- **It uses `network_mode: host`.** Hardened session cookies are `Secure`, so
-  the browser keeps them only for a trustworthy origin. `localhost` qualifies;
-  a container hostname such as `penpot-frontend-local` does not, and the cookie
-  is silently dropped — login appears to succeed and nothing works. Sharing the
-  host network namespace lets the worker say `localhost` and mean it. It is
-  therefore not on the `penpot` network and reaches Penpot through the
-  published port.
+- **The Playwright image tag must match** the playwright version in
+  `mcp/packages/host/package.json`, because a mounted `node_modules` supplies
+  the client library while the image supplies the browsers. A mismatch fails at
+  launch with a browser-not-found error.
+- **It needed `network_mode: host`.** Hardened session cookies are `Secure`, so
+  the browser keeps them only for a trustworthy origin. `localhost` qualifies; a
+  container hostname does not, and the cookie is silently dropped — login
+  appears to succeed and nothing works. Sharing the host network namespace lets
+  the worker say `localhost` and mean it.
 
-The browser profile, which holds the session cookie, lives in the
-`penpot_worker_profile` volume. Deleting that volume just forces a fresh login.
+To survive a reboot, wrap `run-mcp-worker` in a user systemd unit. It already
+runs in the foreground and cleans up its in-container server on exit, which is
+what such a unit wants.
 
 ### One worker per document
 
@@ -277,10 +312,10 @@ cookie does not match, Playwright says only "Target page, context or browser has
 been closed" with empty browser logs; the real message is on the browser's
 stderr.
 
-The `penpot-mcp-worker` container and a `builtin` run both want the instance's
-shared server, so only one of them can hold it — the second plugin connection
-is rejected. Stop the container first, or use `--mcp exec`, which gives the new
-worker a server of its own.
+Two `builtin` runs both want the instance's shared server, so only one of them
+can hold it — the second plugin connection is rejected. Use `--mcp exec`, which
+gives each worker a server of its own; that is also the only mode that scales
+past one document.
 
 Either way, the workspace URL needs **both** `team-id` and `file-id`, and an
 MCP client connects to the `PENPOT_MCP_URL` from `worker/worker.env`. That
@@ -301,20 +336,20 @@ Each step fails differently, so do not skip ahead.
 1. `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9002/readyz` → `200`.
    This is the endpoint the tunnel health-checks.
 2. `curl -s http://127.0.0.1:9002/js/config.js | grep penpotPublicURI`
-   → the **public** URI. Same on `:9001` → `PENPOT_LOCAL_URI`.
-   If these are identical, the two-frontend split is broken; see section 2.
+   → **no output**. The frontend must not bake an origin in; if a line appears,
+   `PENPOT_PUBLIC_URI` has leaked into the frontend service and the worker path
+   will dial the public hostname and hit Access. See section 2.
 3. Browse the public hostname. Access challenges, then Authelia, then Penpot
-   loads with **no password form**.
+   loads. A password form is present and harmless; Access is the gate.
 4. Open `http://localhost:9001` on the Penpot host — or SSH-forward 9001 from
-   elsewhere — and log in as the worker with its password. The password form
-   **is** present here. It must be `localhost`: a LAN hostname over plain HTTP
-   is not a trustworthy origin and the `Secure` session cookie is dropped.
+   elsewhere — and log in as the worker with its password. It must be
+   `localhost`: a LAN hostname over plain HTTP is not a trustworthy origin and
+   the `Secure` session cookie is dropped.
 5. Log in and check `Set-Cookie` carries `Secure; HttpOnly` and **no**
    `Domain`.
 6. Settings → Integrations → enable MCP, and copy the connection URL.
-7. `docker compose --profile worker up -d penpot-mcp-worker`, then
-   `docker compose logs penpot-mcp-worker` → ends with
-   `plugin connected to ws://localhost:9001/mcp/ws`.
+7. `./run-mcp-worker --mcp exec --headless` → ends with
+   `plugin connected to ws://localhost:<ws-port>`.
 
 ## 9. Ports and endpoints, as measured
 
@@ -323,8 +358,8 @@ Audited on a stack built from this file, 2026-09-18. Docker's embedded DNS
 
 | service | listens on | bound to | published to host |
 | --- | --- | --- | --- |
-| **penpot-frontend-public** | 8080 | container network | **`${PENPOT_BIND}:9002`** ← the tunnel target |
-| penpot-frontend-local | 8080 | container network | `${PENPOT_BIND}:9001` (worker only) |
+| **penpot-frontend** | 8080 | container network | **`${PENPOT_BIND}:9002`** ← the tunnel target |
+| penpot-frontend | 8080 | container network | `127.0.0.1:9001` (worker only, same container) |
 | penpot-backend | 6060 | container network | no |
 | penpot-backend | 6063 (PREPL) | **127.0.0.1 inside its own container** | no |
 | penpot-exporter | 6061 | container network | no |
@@ -334,10 +369,10 @@ Audited on a stack built from this file, 2026-09-18. Docker's embedded DNS
 | penpot-valkey | 6379 | container network | no |
 | penpot-mailcatch | 1025, 1080 | container network | `127.0.0.1:1080` |
 
-Only the two nginx ports and the mail catcher reach the host. The frontends
-follow `PENPOT_BIND` (`0.0.0.0` by default); the mail catcher has its own bind
-and stays on loopback. Only `penpot-frontend-public` is meant to reach the
-tunnel.
+Only the two published nginx ports and the mail catcher reach the host, and all
+three come from one nginx plus one mail container. 9002 follows `PENPOT_BIND`
+(`0.0.0.0` by default); 9001 and the mail catcher are pinned to loopback. Only
+port 9002 is meant to reach the tunnel.
 
 PREPL is better protected than it first appears: it binds loopback *inside* the
 backend container, so no other container can reach it either.
@@ -462,9 +497,9 @@ frontends render the correct `PENPOT_PUBLIC_URI` and flag sets; the hardened
 `Secure` cookie is accepted over `http://localhost` (Chromium treats loopback
 as a trustworthy origin); `manage.py` account creation; worker login; and the
 full MCP path — `execute_code`, `high_level_overview`, `penpot_api_info` and
-`export_shape` — driving a file with no human tab open, from the
-`penpot-mcp-worker` container and from `run-mcp-worker`, the latter also
-`--headed` on a VNC display. Two
+`export_shape` — driving a file with no human tab open, via `run-mcp-worker`
+both headless and `--headed` on a VNC display, and from a worker container that
+has since been removed. Two
 documents were driven at once through separate servers, and a second worker
 account created by `provision-worker` joined another account's team from an
 invitation and wrote into that team's file. The
@@ -484,3 +519,9 @@ loading the old origin with no clue why — the container is right and the edge
 is wrong. Purge it, and add a cache rule bypassing `/js/config.js` so it cannot
 happen again. The same applies to `/plugins/mcp/*` if MCP is ever exposed
 publicly.
+
+Verified 2026-09-20, after merging the two frontends into one: a frontend with
+no `PENPOT_PUBLIC_URI` emits no `penpotPublicURI` line, serves `/readyz`,
+`/js/config.js`, the SPA and proxied RPC identically on both published ports,
+and a worker drove a real document through it end to end. The same flag set now
+serves both origins. The backend's own `PENPOT_PUBLIC_URI` is unchanged.

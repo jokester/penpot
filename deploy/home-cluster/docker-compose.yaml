@@ -4,19 +4,20 @@
 ## Derived from docker/images/docker-compose.yaml. Read HANDOFF.md before
 ## changing anything here; several values look arbitrary and are not.
 ##
-## Two frontends serve one backend. This is not redundancy -- the frontend bakes
-## PENPOT_PUBLIC_URI into js/config.js at startup, and every URL the app dials
-## derives from it, including mcp-ws-uri. One value cannot serve both a public
-## hostname and a loopback one, so each gets its own nginx.
-
-x-flags-base: &flags-base >-
-  enable-smtp
-  enable-prepl-server
-  enable-mcp
-  enable-secure-session-cookies
-  enable-login-with-oidc
-  enable-oidc-registration
-  disable-registration
+## ONE frontend serves both the public hostname and the worker's loopback
+## origin, by setting no PENPOT_PUBLIC_URI at all. The entrypoint writes
+## `var penpotPublicURI` into js/config.js only when that variable is non-empty,
+## and app.config/public-uri falls back to location.origin when it is absent
+## (frontend/src/app/config.cljs:181). Every derived URL follows, mcp-ws-uri
+## included, so each browser gets the origin it actually arrived on.
+##
+## This deployment used to run two frontends because one baked-in
+## PENPOT_PUBLIC_URI cannot serve two origins. Dropping the variable removes the
+## need, and with it the edge-cache trap: js/config.js no longer differs by
+## origin, so a CDN caching it cannot serve the wrong one.
+##
+## The backend keeps its own PENPOT_PUBLIC_URI. That one is real -- it builds
+## email links and the OIDC redirect_uri, which must name the public host.
 
 networks:
   penpot:
@@ -24,60 +25,42 @@ networks:
 volumes:
   penpot_postgres_v15:
   penpot_assets:
-  penpot_worker_profile:
 
 services:
-  ## ---------------------------------------------------------------- frontends
+  ## ----------------------------------------------------------------- frontend
 
-  # Public: THIS is the service the Cloudflare tunnel connects to. It binds
-  # ${PENPOT_BIND} so an ingress on another host can reach it.
+  # THIS is the service the Cloudflare tunnel connects to, on
+  # ${PENPOT_PUBLIC_PORT}. It also publishes ${PENPOT_LOCAL_PORT} on loopback for
+  # the MCP worker -- same container, same nginx, two ways in.
   #
-  # Anything that can reach this port skips Cloudflare Access, so on a shared
-  # LAN the gate is only as good as the network. Set PENPOT_BIND=127.0.0.1 and
-  # run cloudflared on this host if you want that closed.
-  penpot-frontend-public:
+  # Anything that can reach the public port skips Cloudflare Access, so on a
+  # shared LAN the gate is only as good as the network. Set PENPOT_BIND=127.0.0.1
+  # and run cloudflared on this host if you want that closed.
+  #
+  # The worker's port stays on loopback because hardened session cookies are
+  # Secure, and a browser only keeps those for a trustworthy origin. localhost
+  # qualifies over plain http; a LAN hostname does not. A worker on another
+  # machine SSH-forwards this port and still calls it localhost.
+  #
+  # No PENPOT_PUBLIC_URI here on purpose -- see the header.
+  penpot-frontend:
     image: "penpotapp/frontend:${PENPOT_VERSION}"
     restart: always
     ports:
       - "${PENPOT_BIND}:${PENPOT_PUBLIC_PORT}:8080"
+      - "127.0.0.1:${PENPOT_LOCAL_PORT}:8080"
     volumes:
       - penpot_assets:/opt/data/assets
     depends_on: [penpot-backend, penpot-exporter, penpot-mcp]
     networks: [penpot]
     environment:
-      # disable-login-with-password hides the password form. This is COSMETIC:
-      # the backend still accepts passwords (the worker account needs that), and
-      # frontend flags only drive the UI. Cloudflare Access is the real gate.
+      # One flag set now serves both origins. enable-login-with-password shows
+      # the password form, which the worker path needs; the public page shows it
+      # too. That is cosmetic either way -- the backend always accepts passwords,
+      # and Cloudflare Access is the real gate on the public port.
       PENPOT_FLAGS: !!str >-
         ${PENPOT_FLAGS_BASE}
-        disable-login-with-password
-      PENPOT_PUBLIC_URI: "https://${PENPOT_HOST}"
-      PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "${PENPOT_MAX_BODY}"
-      PENPOT_HTTP_SERVER_MAX_MULTIPART_BODY_SIZE: "${PENPOT_MAX_BODY}"
-
-  # Worker path: no Cloudflare anywhere in it. OIDC is hidden here (its
-  # redirect_uri points at the public host and cannot come back here) and the
-  # password form is shown, because the worker logs in with a password.
-  #
-  # PENPOT_LOCAL_URI must be an origin the worker's BROWSER considers
-  # trustworthy, because session cookies carry Secure once hardened. localhost
-  # qualifies over plain http; a LAN hostname does not. A worker on another
-  # machine therefore SSH-forwards this port and still calls it localhost.
-  penpot-frontend-local:
-    image: "penpotapp/frontend:${PENPOT_VERSION}"
-    restart: always
-    ports:
-      - "${PENPOT_BIND}:${PENPOT_LOCAL_PORT}:8080"
-    volumes:
-      - penpot_assets:/opt/data/assets
-    depends_on: [penpot-backend, penpot-exporter, penpot-mcp]
-    networks: [penpot]
-    environment:
-      PENPOT_FLAGS: !!str >-
-        ${PENPOT_FLAGS_BASE}
-        disable-login-with-oidc
         enable-login-with-password
-      PENPOT_PUBLIC_URI: "${PENPOT_LOCAL_URI}"
       PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "${PENPOT_MAX_BODY}"
       PENPOT_HTTP_SERVER_MAX_MULTIPART_BODY_SIZE: "${PENPOT_MAX_BODY}"
 
@@ -191,8 +174,8 @@ services:
       PENPOT_FLAGS: "${PENPOT_FLAGS_BASE}"
       PENPOT_SECRET_KEY: "${PENPOT_SECRET_KEY}"
       PENPOT_PUBLIC_URI: "https://${PENPOT_HOST}"
-      # Internal only; the exporter renders through the public frontend's nginx.
-      PENPOT_INTERNAL_URI: http://penpot-frontend-public:8080
+      # Internal only; the exporter renders through the frontend's nginx.
+      PENPOT_INTERNAL_URI: http://penpot-frontend:8080
       PENPOT_REDIS_URI: redis://penpot-valkey/0
 
   penpot-postgres:
@@ -238,38 +221,3 @@ services:
     ports:
       - "${PENPOT_MAILCATCH_BIND}:${PENPOT_MAILCATCH_PORT}:1080"
     networks: [penpot]
-
-  ## The MCP worker: the browser that hosts Penpot's MCP plugin. Inert unless
-  ## started with `--profile worker`. Named worker, not agent, because the thing
-  ## on the other end of the MCP transport is an agent too.
-  ##
-  ## A stock Playwright image with this repo mounted -- no build. Its tag must
-  ## match the playwright version in mcp/packages/host/package.json, because the
-  ## mounted node_modules supplies the client and the image supplies the
-  ## browsers.
-  ##
-  ## network_mode: host is not laziness. Hardened session cookies are Secure, so
-  ## the browser only keeps them for a trustworthy origin; localhost qualifies
-  ## and a container hostname like penpot-frontend-local does not. Sharing the
-  ## host's network namespace lets the worker say localhost and mean it. It is
-  ## therefore NOT on the penpot network and reaches Penpot through the
-  ## published port, so PENPOT_BIND must stay reachable on loopback.
-  penpot-mcp-worker:
-    image: "mcr.microsoft.com/playwright:v${PLAYWRIGHT_VERSION}-noble"
-    restart: always
-    profiles: [worker]
-    network_mode: host
-    working_dir: /repo/mcp/packages/host
-    env_file: [worker/worker.env]
-    environment:
-      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
-      # Inside the container the profile lives on the named volume below, not
-      # in the operator's home directory.
-      PENPOT_PROFILE_DIR: /profile
-    volumes:
-      - "${PENPOT_SRC:-../..}:/repo:ro"
-      - penpot_worker_profile:/profile
-    # Log in if the stored session is gone, then hold the file open.
-    command: >-
-      bash -lc "node spikes/login.js && node host.js"
-
