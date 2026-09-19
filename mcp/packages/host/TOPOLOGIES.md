@@ -50,19 +50,46 @@ structurally impossible (§5).
   MCP client (an LLM agent)
         │  HTTP, streamable  (/mcp or /mcp/stream)
         ▼
-  MCP server ──── WebSocket ────▶ MCP plugin  (iframe inside the page)
-        ▲                              │  Penpot plugin API
-        │                              ▼
-        └──────────────────────── stock Penpot workspace tab
-                                       │  cookie-authenticated
-                                       ▼
-                                  Penpot backend
+  MCP server
+        │  WebSocket  ( = "the plugin dials …" )
+        ▼
+  ┌─────────────────────────────────────────────── the browser page ──┐
+  │  plugins/mcp/index.js   the plugin's IFRAME. Owns the WebSocket   │
+  │        ▲                and the heartbeat. No penpot API.         │
+  │        │ postMessage                                              │
+  │        ▼                                                          │
+  │  plugins/mcp/plugin.js  the plugin SANDBOX. Owns the `penpot`     │
+  │        │                API. No network of its own.               │
+  │        ▼                                                          │
+  │  stock Penpot workspace, cookie-authenticated                     │
+  └───────────────────────────────────────────────────────────────────┘
+        │
+        ▼
+  Penpot backend
 ```
 
-The worker (`host.js`) owns only the bottom-right box: a Playwright persistent
-context with a logged-in session, holding a workspace URL open. It is a browser,
-not a server. `run-mcp-worker` bundles a server alongside it for convenience, but
-the two halves are independent.
+### What "the plugin" actually is
+
+Penpot's own MCP plugin, served as static assets from whichever origin the page
+loaded — `<origin>/plugins/mcp/`. We never build, serve or install it; that is
+the whole reason the worker survives Penpot upgrades.
+
+It is two artifacts, and confusing them wastes time:
+
+| file | runs in | has | size (2.17) |
+| --- | --- | --- | --- |
+| `plugin.js` | Penpot's plugin sandbox | the `penpot` API, no network | 11.3 KB |
+| `index.js` (+ `index.html`) | an iframe the sandbox opens | **the WebSocket** and the heartbeat | 3.8 KB |
+
+`manifest.json` names `plugin.js` as the entry point; that code calls
+`penpot.ui.open("Penpot MCP Plugin", …)` to create the iframe (hidden in
+headless use) and then relays messages to it. So **"the plugin dials X" always
+means index.js opened a WebSocket to X**, and a heartbeat measurement belongs to
+index.js — `plugin.js` carries none on either cloud or self-hosted.
+
+The worker (`host.js`) owns none of this. It is a Playwright persistent context
+with a logged-in session, holding a workspace URL open; Penpot loads the plugin
+by itself once the account has it enabled.
 
 ## 4. How `config.js` decides
 
@@ -97,10 +124,13 @@ something else entirely:
 This is a lie in both directions: the tab is fine, and focusing it changes
 nothing. Measured plugin builds:
 
-| instance | `/plugins/mcp/index.js` | sends heartbeat |
+| instance | `/plugins/mcp/index.js` (the iframe bundle) | sends heartbeat |
 | --- | --- | --- |
 | penpot cloud (2.18.0-RC5) | 4724 bytes | **yes** |
 | self-hosted 2.17 images | 3822 bytes | **no** |
+
+Measure `index.js`, not `plugin.js`: the sandbox half is ~11.3 KB on both and
+has never carried a heartbeat, so comparing it tells you nothing.
 
 The server side of this repo (`develop`) *requires* heartbeats
 (`mcp/packages/server/src/PluginBridge.ts`). Therefore:
