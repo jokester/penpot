@@ -55,7 +55,11 @@ Server:
   --ws-uri URI       What the BROWSER dials; default ws://localhost:<ws-port>
   --multi-user       Require ?userToken= from clients, as the packaged image
                      does. Off here: single-user needs no token at all.
-  --repl             Also start the server's REPL console.
+  --repl             Also start the server's REPL console, on PORT+2. Off by
+                     default: the stock 2.17 server always tries to start one,
+                     and without this it is aimed at an occupied port so the
+                     listen fails. In exec mode the console is reachable only
+                     from inside the container unless you publish the port.
 
 Document and browser:
   --file-id UUID     Drive this file instead of the one in the env file. Also
@@ -195,12 +199,22 @@ exec)
     EXEC_PIDFILE="/tmp/mcp-$PORT.pid"
     echo "[run] MCP server  exec in penpot-mcp   http://127.0.0.1:$PORT/mcp   ws://localhost:$WS_PORT"
     args=""; [[ "$MULTI_USER" == true ]] && args="--multi-user"
+    # PENPOT_MCP_REPL_ENABLE does not exist in the 2.17 bundle, which builds its
+    # ReplServer unconditionally. PENPOT_MCP_REPL_PORT does exist, so aim the
+    # REPL at a port that is already taken and its listen fails, silently and
+    # harmlessly. $PORT is this server's own HTTP port, bound first.
+    if [[ "$REPL" == true ]]; then
+        repl_port="$((PORT + 2))"
+        echo "[run] MCP REPL    http://127.0.0.1:$repl_port/  (container-only unless published)"
+    else
+        repl_port="$PORT"
+    fi
     (
         cd "$HERE"
         docker compose exec -T \
             -e PENPOT_MCP_SERVER_PORT="$PORT" \
             -e PENPOT_MCP_WEBSOCKET_PORT="$WS_PORT" \
-            -e PENPOT_MCP_REPL_ENABLE="$REPL" \
+            -e PENPOT_MCP_REPL_PORT="$repl_port" \
             penpot-mcp sh -c "echo \$\$ > $EXEC_PIDFILE; exec node index.js $args"
     ) &
     SERVER_PID=$!
@@ -218,6 +232,8 @@ local)
     fi
     echo "[run] MCP server  http://$HOST:$PORT/mcp   ws://$HOST:$WS_PORT"
     args=(); [[ "$MULTI_USER" == true ]] && args+=(--multi-user)
+    # A locally built server comes from this repo, where the REPL really is
+    # gated by PENPOT_MCP_REPL_ENABLE -- no port trick needed, unlike exec mode.
     # ConfigurationLoader resolves data/ against process.cwd().
     (
         cd "$(dirname "$DIST")"

@@ -329,7 +329,7 @@ Audited on a stack built from this file, 2026-09-18. Docker's embedded DNS
 | penpot-backend | 6063 (PREPL) | **127.0.0.1 inside its own container** | no |
 | penpot-exporter | 6061 | container network | no |
 | penpot-mcp | 4401, 4402 | container network | no |
-| penpot-mcp | **4403 (REPL)** | container network | no |
+| penpot-mcp | ~~4403 (REPL)~~ | **suppressed, does not listen** | no |
 | penpot-postgres | 5432 | container network | no |
 | penpot-valkey | 6379 | container network | no |
 | penpot-mailcatch | 1025, 1080 | container network | `127.0.0.1:1080` |
@@ -342,25 +342,35 @@ tunnel.
 PREPL is better protected than it first appears: it binds loopback *inside* the
 backend container, so no other container can reach it either.
 
-### The MCP REPL on 4403 needs a decision
+### The MCP REPL on 4403 is suppressed
 
-The stock MCP image starts an HTTP REPL on 4403 that this compose file cannot
-turn off: `PENPOT_MCP_REPL_ENABLE` does not exist in the 2.17 bundle. It serves
-a web console at `/` and accepts `POST /execute` with a `code` body, which it
-runs against the connected Penpot plugin. **There is no authentication on it** —
-measured from a neighbouring container, `GET /` returns 200 and `/execute`
-returns 500 only because no plugin was attached, not because it was refused.
+The stock MCP image builds an HTTP REPL that serves a web console at `/` and
+accepts `POST /execute`, running the posted code against the connected Penpot
+plugin. In 2.17 it is constructed unconditionally: `PENPOT_MCP_REPL_ENABLE`,
+which gates it in later builds, does not exist in that bundle.
 
-It is not published to the host and nginx does not proxy it, so the blast radius
-is the `penpot` Docker network. Three ways to handle that, in order of cost:
+`PENPOT_MCP_REPL_PORT` *does* exist, so the compose file aims the REPL at 4401 —
+the port the MCP server itself binds first. The REPL loses the race, and the
+failure is silent and harmless: the log still claims "REPL server started", but
+no socket appears and the process runs normally. `run-mcp-worker` does the same
+for each `--mcp exec` server, pointing the REPL at that server's own port.
 
-1. **Attach nothing else to the `penpot` network.** It is declared in this file
-   and used only by these services. This is the default and is adequate.
-2. **Upgrade past 2.17 when available.** Later builds gate the REPL behind
-   `PENPOT_MCP_REPL_ENABLE`, and it then does not listen at all.
-3. Mount a locally built MCP server that has the gate. This works but forks the
-   server, and the server and the frontend-bundled plugin must then be upgraded
-   as a matched pair. Not worth it for this alone.
+Measured after the change: the container listens on 4401 and 4402 only, `/` on
+4401 returns the MCP server's own 404 rather than the console, and a full
+`execute_code` round trip against a real document still succeeds.
+
+To evaluate the REPL later, give a throwaway server a port of its own — nothing
+in the compose file needs changing:
+
+```sh
+docker compose exec -e PENPOT_MCP_SERVER_PORT=4699 \
+    -e PENPOT_MCP_WEBSOCKET_PORT=4698 -e PENPOT_MCP_REPL_PORT=4403 \
+    penpot-mcp node index.js
+# from another shell, inside the container -- it is routable nowhere else:
+docker compose exec penpot-mcp curl 127.0.0.1:4403/
+```
+
+Or `./run-mcp-worker --mcp exec --repl`, which puts it on the server port plus 2.
 
 ### HTTP surface through nginx
 
@@ -401,10 +411,20 @@ database migrations run on start.
 - **Mailcatch holds every message the instance sends**, password-reset links
   included. It is bound to loopback on purpose. Never route it through the
   tunnel. Point `PENPOT_SMTP_*` at a real relay if resets must work off-host.
-- **Two unauthenticated REPLs run inside the network**: the backend's PREPL on
+- **One unauthenticated REPL runs inside the network**: the backend's PREPL on
   6063, which `manage.py` needs and which binds loopback inside its own
-  container, and the MCP server's on 4403, which does not. Section 9 measures
-  both and says what to do about the second.
+  container. The MCP server's REPL on 4403 is suppressed; section 9 says how.
+- **`enable-rpc-climit` needs a config file the image does not ship.** The
+  source tree's `backend/resources/climit.edn` is an example and is not in the
+  uberjar, and the default setting points at a relative path that does not
+  exist in the container. Without a file the backend crash-loops on
+  `NoSuchFileException: resources/climit.edn`. This deployment carries its own
+  `climit.edn` and mounts it; `PENPOT_RPC_CLIMIT_CONFIG` names it absolutely.
+- **`enable-sec-fetch-metadata-middleware` does not block MCP or scripts.** It
+  403s cross-site requests using unsafe methods. A non-browser client sends no
+  `Sec-Fetch-Site` header at all and falls through to the permissive branch, so
+  agents, `curl` and the MCP server are unaffected. Measured: cross-site POST
+  403, same-origin POST 200, header-less POST 200.
 - **`disable-login-with-password` on the public frontend is cosmetic.** It
   hides the form. The backend still accepts passwords, because the worker needs
   them. Cloudflare Access is the real gate.

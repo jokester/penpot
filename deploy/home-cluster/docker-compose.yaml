@@ -88,6 +88,9 @@ services:
     restart: always
     volumes:
       - penpot_assets:/opt/data/assets
+      # enable-rpc-climit needs a config file the image does not ship. See the
+      # header of climit.edn.
+      - "./climit.edn:/opt/penpot/backend/climit.edn:ro"
     depends_on:
       penpot-postgres: {condition: service_healthy}
       penpot-valkey: {condition: service_healthy}
@@ -110,6 +113,10 @@ services:
 
       PENPOT_OBJECTS_STORAGE_BACKEND: fs
       PENPOT_OBJECTS_STORAGE_FS_DIRECTORY: /opt/data/assets
+
+      # Absolute on purpose: the default is the relative "resources/climit.edn",
+      # which resolves against the working directory and does not exist there.
+      PENPOT_RPC_CLIMIT_CONFIG: /opt/penpot/backend/climit.edn
 
       PENPOT_TELEMETRY_ENABLED: "false"
 
@@ -149,6 +156,24 @@ services:
     image: "penpotapp/mcp:${PENPOT_VERSION}"
     restart: always
     networks: [penpot]
+    environment:
+      # Suppress the REPL. The 2.17 bundle constructs its ReplServer
+      # unconditionally (index.js, `new ReplServer(...)`) and has no
+      # PENPOT_MCP_REPL_ENABLE -- that gate only exists in later builds. It does
+      # honour PENPOT_MCP_REPL_PORT, so pointing the REPL at the port the MCP
+      # server itself binds first makes the listen lose the race. Measured: the
+      # MCP endpoint answers normally, `/` returns the MCP server's 404 instead
+      # of the REPL console, no extra socket appears, and the process stays up.
+      # The failure is silent -- the log still says "REPL server started".
+      #
+      # To evaluate the REPL later, start a throwaway server beside this one and
+      # give it a port of its own; nothing here needs changing:
+      #   docker compose exec -e PENPOT_MCP_SERVER_PORT=4699 \
+      #       -e PENPOT_MCP_WEBSOCKET_PORT=4698 -e PENPOT_MCP_REPL_PORT=4403 \
+      #       penpot-mcp node index.js
+      # then reach it from inside the container, which is the only place it is
+      # routable: `docker compose exec penpot-mcp curl 127.0.0.1:4403/`.
+      PENPOT_MCP_REPL_PORT: "4401"
     # A port range for per-document servers started with `docker compose exec`
     # inside this container (see run-mcp-worker --mcp exec). Publishing the
     # range costs nothing while unused, and exec'd servers inherit the image's
