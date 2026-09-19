@@ -31,9 +31,8 @@ worker                                                                  │   ex
 | **health check** | `GET /readyz` |
 
 Point the Cloudflare tunnel at `http://<this-host>:9002` and put the Access
-policy on the hostname. If `cloudflared` runs as a container here instead, use
-`--profile tunnel` and it reaches `http://penpot-frontend-public:8080` over the
-compose network, needing no published port at all.
+policy on the hostname. Running the tunnel is out of scope for this file — it
+belongs to whatever manages the cluster's ingress, not to Penpot.
 
 **Nothing else goes to the tunnel.** Not `penpot-frontend-local` (port 9001,
 the worker path, no Access in front of it), and above all not the mail catcher,
@@ -177,6 +176,12 @@ makes a scratch file, and writes `worker/worker-a.env` with a generated
 password. Repeat it per worker; each gets its own env file, and the launcher
 lists them all under Account.
 
+Re-running it is safe, and is how you add a team, rotate the MCP token, or
+rewrite a lost env file. The profile is created once; `--reset-password` sets a
+new password on an account that already exists (its old one lives only in the
+env file, so there is nothing else to recover it from), and an invitation that
+has already been accepted is reported and skipped.
+
 ### Letting a worker into your documents
 
 A fresh worker sees only its own scratch project. To let it work on your files,
@@ -187,8 +192,10 @@ the invitation link, and hand it over:
 ./provision-worker --email worker-a@penpot.local --invite '<link or token>'
 ```
 
-The worker accepts the invitation itself, so the only manual step is the invite
-you would make for any collaborator. Afterwards the launcher lists that team's
+Pass `--invite` more than once to join several teams in one run; a worker
+belongs to as many as it has been invited to. The worker accepts each
+invitation itself, so the only manual step is the invite you would make for any
+collaborator. Afterwards the launcher lists that team's
 documents alongside its own, and a worker driving a file in someone else's team
 needs **both** ids in the workspace URL — the launcher passes `--team-id` as
 well as `--file-id` for exactly this reason.
@@ -217,12 +224,6 @@ things about it are deliberate:
 
 The browser profile, which holds the session cookie, lives in the
 `penpot_worker_profile` volume. Deleting that volume just forces a fresh login.
-
-### Or run it on the host
-
-`worker/worker-start.sh --bg` and `worker/worker-stop.sh` do the same thing
-outside Docker. That needs Node 22+, pnpm, and
-`pnpm exec playwright install chromium` in `mcp/packages/host`.
 
 ### One worker per document
 
@@ -441,9 +442,9 @@ frontends render the correct `PENPOT_PUBLIC_URI` and flag sets; the hardened
 `Secure` cookie is accepted over `http://localhost` (Chromium treats loopback
 as a trustworthy origin); `manage.py` account creation; worker login; and the
 full MCP path — `execute_code`, `high_level_overview`, `penpot_api_info` and
-`export_shape` — driving a file with no human tab open, run both from
-`worker/worker-start.sh` on the host and from the `penpot-mcp-worker`
-container, and `run-mcp-worker --headed` was driven on a VNC display. Two
+`export_shape` — driving a file with no human tab open, from the
+`penpot-mcp-worker` container and from `run-mcp-worker`, the latter also
+`--headed` on a VNC display. Two
 documents were driven at once through separate servers, and a second worker
 account created by `provision-worker` joined another account's team from an
 invitation and wrote into that team's file. The

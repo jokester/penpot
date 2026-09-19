@@ -107,13 +107,26 @@ set -a; source "$ENV_FILE"; set +a
 
 # --file-id retargets the URL and isolates the profile, so two workers started
 # from the same env file do not collide on the browser profile lock.
+# The id patterns end in * rather than +: a worker provisioned without a
+# scratch file has an empty file-id in its env, and a + would match nothing,
+# leaving the override silently unapplied.
 if [[ -n "$FILE_ID" ]]; then
-    PENPOT_FILE_URL="$(sed -E "s/file-id=[0-9a-fA-F-]+/file-id=$FILE_ID/" <<<"$PENPOT_FILE_URL")"
+    PENPOT_FILE_URL="$(sed -E "s/file-id=[0-9a-fA-F-]*/file-id=$FILE_ID/" <<<"$PENPOT_FILE_URL")"
     [[ -z "$PROFILE_DIR" ]] && PROFILE_DIR="$HOME/.cache/penpot-headless/profile-${FILE_ID:0:8}"
 fi
 if [[ -n "$TEAM_ID" ]]; then
-    PENPOT_FILE_URL="$(sed -E "s/team-id=[0-9a-fA-F-]+/team-id=$TEAM_ID/" <<<"$PENPOT_FILE_URL")"
+    PENPOT_FILE_URL="$(sed -E "s/team-id=[0-9a-fA-F-]*/team-id=$TEAM_ID/" <<<"$PENPOT_FILE_URL")"
 fi
+
+# A blank id renders an empty workspace with a clean console, the most
+# expensive failure in this system to diagnose. Refuse it up front.
+for part in file-id team-id; do
+    if [[ "$PENPOT_FILE_URL" =~ ${part}=(\&|$) ]]; then
+        echo "$part is empty in the workspace URL. Pass --${part}, or set a" >&2
+        echo "complete PENPOT_FILE_URL in the env file." >&2
+        exit 2
+    fi
+done
 [[ -n "$PROFILE_DIR" ]] && export PENPOT_PROFILE_DIR="$PROFILE_DIR"
 export PENPOT_FILE_URL
 

@@ -248,14 +248,3 @@ services:
     command: >-
       bash -lc "node spikes/login.js && node host.js"
 
-  ## Optional tunnel, inert unless started with `--profile tunnel`. Reaches the
-  ## public frontend over the compose network, so PENPOT_BIND can stay closed
-  ## when this is used. Create the tunnel in Cloudflare first and put its token
-  ## in CLOUDFLARED_TOKEN.
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    restart: always
-    profiles: [tunnel]
-    command: tunnel --no-autoupdate run --token ${CLOUDFLARED_TOKEN:-}
-    depends_on: [penpot-frontend-public]
-    networks: [penpot]

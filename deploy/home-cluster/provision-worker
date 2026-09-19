@@ -8,11 +8,18 @@ worker credential reaches.
 
   provision-worker --email worker-a@penpot.local
   provision-worker --email worker-a@penpot.local --invite '<link or token>'
+  provision-worker --email worker-a@penpot.local --reset-password \
+      --invite '<team one>' --invite '<team two>'
 
 The invite is how a worker reaches documents it does not own.  Invite the
 worker from Penpot (Team > Invitations), copy the link, and pass it here; the
 worker accepts it and can then drive that team's files.  Without one it only
 sees its own scratch project.
+
+Re-running is safe and is the way to add a team, rotate the MCP token, or
+rewrite a lost env file.  The profile is only created once; --reset-password
+sets a new password on an account that already exists, and an invitation that
+has already been accepted is ignored rather than treated as an error.
 
 Stdlib only.  Runs `docker compose exec penpot-backend python3 manage.py` to
 create the profile, then talks to the RPC API for the rest.
@@ -55,26 +62,49 @@ def login(origin, email, password):
     return profile, match.group(1)
 
 
-def create_profile(name, email, password):
+def manage(*args):
     result = subprocess.run(
-        ["docker", "compose", "exec", "-T", "penpot-backend", "python3", "manage.py",
-         "create-profile", "-n", name, "-e", email, "-p", password,
-         "--skip-tutorial", "--skip-walkthrough"],
+        ["docker", "compose", "exec", "-T", "penpot-backend", "python3", "manage.py", *args],
         cwd=HERE, capture_output=True, text=True,
     )
-    output = (result.stdout + result.stderr).strip()
-    if result.returncode != 0 and "already exists" not in output.lower():
+    return result.returncode, (result.stdout + result.stderr).strip()
+
+
+def create_profile(name, email, password, reset):
+    """Create the profile, or reset an existing one's password when asked.
+
+    Re-running provisioning is normal -- a token is regenerated, an env file is
+    rewritten -- but the password only lives in the env file, so a profile that
+    already exists cannot be logged into with a fresh one. Resetting is a real
+    change to an account, so it stays behind a flag.
+    """
+    code, output = manage("create-profile", "-n", name, "-e", email, "-p", password,
+                          "--skip-tutorial", "--skip-walkthrough")
+    if code == 0:
+        return output
+    if "already exists" not in output.lower():
         raise RuntimeError("create-profile failed: %s" % output[:300])
-    return output
+    if not reset:
+        raise RuntimeError(
+            "%s already exists. Its password is only in its env file; pass "
+            "--reset-password to set a new one, or --password to reuse the old." % email
+        )
+    code, output = manage("update-profile", "-e", email, "-p", password)
+    if code != 0:
+        raise RuntimeError("update-profile failed: %s" % output[:300])
+    return "Reset password for %s" % email
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--email", required=True)
     parser.add_argument("--password", help="default: generated")
+    parser.add_argument("--reset-password", action="store_true",
+                        help="if the account exists, set its password to the new one")
     parser.add_argument("--name", default=None, help="display name; default derived from the email")
     parser.add_argument("--origin", default="http://localhost:9001")
-    parser.add_argument("--invite", default="", help="invitation link or token, to join a team")
+    parser.add_argument("--invite", action="append", default=[], metavar="LINK",
+                        help="invitation link or token; repeat to join several teams")
     parser.add_argument("--file-name", default="worker-scratch", help="scratch file to create; '' to skip")
     parser.add_argument("--env-out", default=None, help="default: worker/<local part of email>.env")
     args = parser.parse_args()
@@ -83,17 +113,28 @@ def main():
     name = args.name or args.email.split("@")[0]
     env_out = Path(args.env_out) if args.env_out else WORKER_DIR / f"{args.email.split('@')[0]}.env"
 
-    print(create_profile(name, args.email, password))
+    print(create_profile(name, args.email, password, args.reset_password))
     profile, cookie = login(args.origin, args.email, password)
     print("logged in as", args.email)
 
-    if args.invite:
-        match = TOKEN_RE.search(args.invite)
+    for invite in args.invite:
+        match = TOKEN_RE.search(invite)
         if not match:
-            print("could not find a token in --invite", file=sys.stderr)
+            print("could not find a token in --invite %s" % invite[:40], file=sys.stderr)
             return 2
-        joined, _ = rpc(args.origin, "verify-token", {"token": match.group(0)}, cookie)
-        print("joined team:", (joined or {}).get("teamId"), "as", (joined or {}).get("role"))
+        try:
+            joined, _ = rpc(args.origin, "verify-token", {"token": match.group(0)}, cookie)
+            print("joined team:", (joined or {}).get("teamId"), "as", (joined or {}).get("role"))
+        except urllib.error.HTTPError as exc:
+            # A worker belongs to as many teams as it has been invited to, and
+            # re-running provisioning is normal, so an invitation that is spent
+            # or already accepted is not a failure.
+            body = exc.read().decode(errors="replace")
+            if exc.code == 400 and ("invalid-token" in body or "already" in body):
+                print("invitation already used or expired; leaving membership as it is")
+            else:
+                raise
+    if args.invite:
         profile, cookie = login(args.origin, args.email, password)
 
     # MCP off by default; the token is what the plugin presents, and creating
