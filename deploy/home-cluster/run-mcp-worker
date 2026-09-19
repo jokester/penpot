@@ -27,6 +27,8 @@ WS_PORT=""
 WS_URI=""
 MULTI_USER=false
 REPL=false
+BROWSER=host              # host | container
+WORKER_IMAGE="${PENPOT_WORKER_IMAGE:-}"
 ENV_FILE="$HERE/worker/worker.env"
 FILE_ID=""
 TEAM_ID=""
@@ -76,6 +78,16 @@ Document and browser:
                      but no authorization protocol specified" means the cookie
                      does not match, not that the flag is wrong.
   --headless         Hide it (default).
+  --browser host|container
+                     Where the browser runs. "host" (default) uses the
+                     Playwright build in mcp/packages/host/node_modules, which
+                     you keep current with `pnpm exec playwright install`.
+                     "container" runs it inside the pinned Playwright image
+                     instead, so the browser version is fixed by the image tag
+                     rather than by whatever is installed here. Headed works in
+                     both: the container draws on your X server through the
+                     mounted socket. Override the image with
+                     PENPOT_WORKER_IMAGE.
 
   --env-file PATH    Defaults to worker/worker.env. Flags override it.
 USAGE
@@ -93,6 +105,7 @@ while [[ $# -gt 0 ]]; do
         --profile)  PROFILE_DIR="$2"; shift 2 ;;
         --headed)   HEADLESS=false; shift ;;
         --headless) HEADLESS=true; shift ;;
+        --browser)  BROWSER="$2"; shift 2 ;;
         --mcp)      MODE="$2"; shift 2 ;;
         --multi-user) MULTI_USER=true; shift ;;
         --repl)     REPL=true; shift ;;
@@ -102,6 +115,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$MODE" in builtin|exec|local) ;; *) echo "--mcp must be builtin, exec or local" >&2; exit 2 ;; esac
+case "$BROWSER" in host|container) ;; *) echo "--browser must be host or container" >&2; exit 2 ;; esac
 
 [[ -f "$ENV_FILE" ]] || { echo "no such env file: $ENV_FILE" >&2; exit 2; }
 set -a; source "$ENV_FILE"; set +a
@@ -176,7 +190,11 @@ pick_ports() {
 
 SERVER_PID=""
 EXEC_PIDFILE=""
+CONTAINER_ENV=""
 cleanup() {
+    # Holds the worker's password when --browser container is used.
+    [[ -n "$CONTAINER_ENV" ]] && rm -f "$CONTAINER_ENV" || true
+
     # A `docker compose exec` client dying does NOT stop the process inside the
     # container, so it is killed by the pid it recorded on the way up.
     if [[ -n "$EXEC_PIDFILE" ]]; then
@@ -263,9 +281,76 @@ export PENPOT_HOST_HEADLESS="$HEADLESS"
 echo "[run] browser      headless=$HEADLESS display=${DISPLAY:-none} profile=${PENPOT_PROFILE_DIR:-default}"
 echo "[run] document     ${PENPOT_FILE_URL:0:100}"
 
-if [[ -n "${PENPOT_EMAIL:-}" && -n "${PENPOT_PASSWORD:-}" ]]; then
-    node "$HOST_DIR/spikes/login.js" >/dev/null 2>&1 || true
+if [[ "$BROWSER" == host ]]; then
+    if [[ -n "${PENPOT_EMAIL:-}" && -n "${PENPOT_PASSWORD:-}" ]]; then
+        node "$HOST_DIR/spikes/login.js" >/dev/null 2>&1 || true
+    fi
+    cd "$HOST_DIR"
+    exec node host.js
 fi
 
-cd "$HOST_DIR"
-node host.js
+## ---------------------------------------------------------------- container
+
+# The browser runs inside the pinned Playwright image, so its version is fixed
+# by the image tag instead of by whatever `playwright install` last put in the
+# host cache. The playwright CLIENT still comes from the mounted node_modules,
+# so the two must agree: default the tag to the installed client's version.
+if [[ -z "$WORKER_IMAGE" ]]; then
+    pw_version="$(node -p "require('$HOST_DIR/node_modules/playwright/package.json').version" 2>/dev/null)" \
+        || { echo "cannot read the installed playwright version -- run pnpm install in mcp/" >&2; exit 1; }
+    WORKER_IMAGE="mcr.microsoft.com/playwright:v${pw_version}-noble"
+fi
+if ! docker image inspect "$WORKER_IMAGE" >/dev/null 2>&1; then
+    echo "[run] pulling $WORKER_IMAGE (~2.5 GB, once)" >&2
+fi
+
+# --network host is not laziness. Hardened session cookies are Secure, so the
+# browser keeps them only for a trustworthy origin; localhost qualifies and a
+# container hostname does not. Sharing the host's network namespace lets the
+# worker say localhost and mean it -- and lets it reach an --mcp exec server on
+# 127.0.0.1. --ipc host keeps Chromium from dying on a small /dev/shm.
+#
+# Running as the invoking user keeps the browser profile owned by you rather
+# than by root, and lets the container read your X authority file.
+docker_args=(
+    --rm --init
+    --network host --ipc host
+    --user "$(id -u):$(id -g)"
+    -v "$REPO:/repo:ro"
+    -w /repo/mcp/packages/host
+    -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+)
+
+# The profile must live on a bind mount, not in the container, or every run
+# starts logged out. HOME goes with it: Chromium writes crash state there.
+profile_host="${PENPOT_PROFILE_DIR:-$HOME/.cache/penpot-headless/profile-local}"
+mkdir -p "$profile_host"
+docker_args+=(-v "$profile_host:/profile" -e PENPOT_PROFILE_DIR=/profile -e HOME=/profile)
+
+if [[ "$HEADLESS" != true ]]; then
+    [[ -n "${DISPLAY:-}" ]] || { echo "--headed needs DISPLAY set" >&2; exit 2; }
+    # X11 over the mounted unix socket; there is normally no TCP listener. The
+    # xauth cookie is keyed by hostname, which --network host preserves.
+    docker_args+=(-v /tmp/.X11-unix:/tmp/.X11-unix -e "DISPLAY=$DISPLAY")
+    if [[ -n "${XAUTHORITY:-$HOME/.Xauthority}" && -r "${XAUTHORITY:-$HOME/.Xauthority}" ]]; then
+        docker_args+=(-v "${XAUTHORITY:-$HOME/.Xauthority}:/xauth:ro" -e XAUTHORITY=/xauth)
+    fi
+fi
+
+# Through a file, not `-e`: a docker run command line is world-readable in ps,
+# and PENPOT_PASSWORD would sit in it for the life of the worker.
+CONTAINER_ENV="$(mktemp "${TMPDIR:-/tmp}/penpot-worker-env.XXXXXX")"
+chmod 600 "$CONTAINER_ENV"
+for var in PENPOT_ORIGIN PENPOT_FILE_URL PENPOT_EMAIL PENPOT_PASSWORD \
+           PENPOT_MCP_MODE PENPOT_MCP_WS_URI PENPOT_MCP_WEBSOCKET_PORT \
+           PENPOT_BROWSER_CHANNEL PENPOT_CLEAR_CACHE PENPOT_HOST_HEADLESS; do
+    [[ -n "${!var:-}" ]] && printf '%s=%s\n' "$var" "${!var}" >>"$CONTAINER_ENV" || true
+done
+docker_args+=(--env-file "$CONTAINER_ENV")
+
+echo "[run] browser      in $WORKER_IMAGE"
+login=""
+[[ -n "${PENPOT_EMAIL:-}" && -n "${PENPOT_PASSWORD:-}" ]] && login="node spikes/login.js >/dev/null 2>&1 || true; "
+# Not exec: cleanup() has to run to remove the env file.
+docker run "${docker_args[@]}" "$WORKER_IMAGE" \
+    bash -lc "${login}exec node host.js"

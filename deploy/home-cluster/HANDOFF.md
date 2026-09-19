@@ -238,27 +238,49 @@ documents alongside its own, and a worker driving a file in someone else's team
 needs **both** ids in the workspace URL — the launcher passes `--team-id` as
 well as `--file-id` for exactly this reason.
 
-### Running the worker unattended
+### Where the browser runs: `--browser host|container`
 
-There is no worker container any more. `run-mcp-worker` on the host is the only
-path, which is what has actually been used throughout; the compose service was
-removed rather than left as a second, untested way to do the same thing.
+There is no worker compose service any more, but the browser can still run in a
+container. `run-mcp-worker --browser container` starts it inside the pinned
+Playwright image instead of using the host's Playwright install, and **headed
+works either way** — the container draws on your X server through the mounted
+socket.
 
-Two things it relied on are worth keeping in mind if you ever reinstate it:
+| | `--browser host` (default) | `--browser container` |
+| --- | --- | --- |
+| browser build | `mcp/packages/host/node_modules` + host Playwright cache | `/ms-playwright` inside the image |
+| version pinned by | whatever `playwright install` last fetched | the image tag |
+| needs | nothing extra | docker, and the image (~2.5 GB, pulled once) |
+| headed | yes | yes, via `/tmp/.X11-unix` |
 
-- **The Playwright image tag must match** the playwright version in
-  `mcp/packages/host/package.json`, because a mounted `node_modules` supplies
-  the client library while the image supplies the browsers. A mismatch fails at
-  launch with a browser-not-found error.
-- **It needed `network_mode: host`.** Hardened session cookies are `Secure`, so
-  the browser keeps them only for a trustworthy origin. `localhost` qualifies; a
-  container hostname does not, and the cookie is silently dropped — login
-  appears to succeed and nothing works. Sharing the host network namespace lets
-  the worker say `localhost` and mean it.
+Use `container` when you want the browser version fixed — an upgrade of the
+host's Playwright cannot then change what the worker runs. The tag defaults to
+`mcr.microsoft.com/playwright:v<installed playwright version>-noble`, read from
+the mounted `node_modules`, because the client and the browsers must agree.
+Override with `PENPOT_WORKER_IMAGE`.
+
+Four details of the container invocation are deliberate:
+
+- **`--network host`.** Hardened session cookies are `Secure`, so the browser
+  keeps them only for a trustworthy origin. `localhost` qualifies; a container
+  hostname does not, and the cookie is silently dropped — login appears to
+  succeed and nothing works. The host namespace also lets the browser reach an
+  `--mcp exec` server on `127.0.0.1`.
+- **`--user $(id -u):$(id -g)`.** Keeps the browser profile owned by you instead
+  of root, and lets the container read your `~/.Xauthority`.
+- **`--ipc host`.** Chromium dies on the default small `/dev/shm`.
+- **Environment goes through a mode-600 `--env-file`, never `-e`.** A
+  `docker run` command line is world-readable in `ps`, and `PENPOT_PASSWORD`
+  would sit in it for the life of the worker. The file is removed by the same
+  cleanup that stops the in-container MCP server.
+
+For headed runs the X socket is mounted rather than used over TCP, because
+TigerVNC listens on 5903 for VNC but publishes no X11 TCP port. The xauth cookie
+is keyed by hostname, which `--network host` preserves.
 
 To survive a reboot, wrap `run-mcp-worker` in a user systemd unit. It already
-runs in the foreground and cleans up its in-container server on exit, which is
-what such a unit wants.
+runs in the foreground and cleans up after itself, which is what such a unit
+wants.
 
 ### One worker per document
 

@@ -118,6 +118,54 @@ keeps serving the old plugin. `CLEAR_CACHE` drops `Cache`, `Code Cache`,
 `GPUCache` and `Service Worker/CacheStorage` at launch for this reason. Cookies
 are untouched.
 
+## 5b. Where the browser comes from
+
+A third axis, independent of the two above: the *browser* the worker drives.
+
+| | host | container |
+| --- | --- | --- |
+| binary | Playwright's cache, e.g. `~/.cache/ms-playwright/chromium-1243` | `/ms-playwright` inside `mcr.microsoft.com/playwright:v<x>-noble` |
+| pinned by | whatever `playwright install` last fetched | the image tag |
+| headed | yes | yes — mount `/tmp/.X11-unix`, set `DISPLAY` |
+
+Neither is the distribution's `/usr/bin/chromium`; Playwright never uses that.
+`run-mcp-worker --browser container` selects the second, and the image tag
+defaults to the *installed client's* version, because the Playwright client and
+the browser build must agree.
+
+Verified: a container launched with `--network host --ipc host --user $(id -u)`,
+`/tmp/.X11-unix` and `~/.Xauthority` mounted, and `DISPLAY=:3`, put a visible
+Chromium window on the host's TigerVNC display and drove a real document through
+it. `xwininfo -root -tree -display :3` showed the window with profile `/profile`,
+and the process was `/ms-playwright/chromium-1243/chrome-linux64/chrome`.
+
+Two traps found while building it:
+
+- **The X socket, not TCP.** TigerVNC listens on 5903 for VNC but publishes no
+  X11 TCP port, so `DISPLAY=host:3` cannot work; the unix socket must be bind
+  mounted. The xauth cookie is keyed by hostname, which `--network host`
+  preserves anyway.
+- **Never pass secrets with `docker run -e`.** A container's command line is
+  world-readable in `ps` for the life of the process, and the worker's env
+  carries `PENPOT_PASSWORD`. Use a mode-600 `--env-file` and delete it on exit.
+
+### Cloud needs Google Chrome, which is a separate install
+
+For a non-loopback origin `config.js` sets `CHANNEL = "chrome"`, and that means
+*stock Google Chrome*, not the bundled build and not distro chromium:
+
+```
+browserType.launch: Chromium distribution 'chrome' is not found
+                    at /opt/google/chrome/chrome
+```
+
+So experiment 1 below needs `npx playwright install chrome` first — or
+`PENPOT_BROWSER_CHANNEL=""` to force the bundled build, which is untested
+against Cloudflare. The measured finding is only that the *headless shell* is
+challenged; whether bundled Chromium in headed mode passes was never
+established. The `--browser container` path does not help here: the Playwright
+image ships Chromium, not Google Chrome.
+
 ## 6. What differs between cloud and self-hosted
 
 | | penpot cloud | self-hosted |
@@ -213,7 +261,7 @@ answer from a real document, no human tab open:
 
 - cloud, own server + injected URI (`local`-equivalent)
 - self-hosted, `exec`, headless and headed, one and two documents at once
-- self-hosted, containerized worker (`--profile worker`)
+- self-hosted, containerized browser on the host X server (`--browser container --headed`)
 
 **Not driven yet:**
 
@@ -231,8 +279,9 @@ answer from a real document, no human tab open:
 ## 11. Experiments worth running
 
 1. **Drive cloud in `builtin` mode.** Needs `mcpEnabled` + an `mcp` token on the
-   account, both set through the UI. If it works, the worker reduces to "a
-   browser and a URL" — no server, no ports, no injection.
+   account, both set through the UI, **and Google Chrome installed** (§5b). If
+   it works, the worker reduces to "a browser and a URL" — no server, no ports,
+   no injection.
 2. **Two workers, one account, cloud.** Does cloud's multi-user server route
    correctly when two browsers present the same `userToken`, or does the second
    displace the first? This is the shared-server limitation that pushed the
