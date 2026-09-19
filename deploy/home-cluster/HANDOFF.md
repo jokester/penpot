@@ -150,7 +150,62 @@ Each step fails differently, so do not skip ahead.
    `Domain`.
 6. Settings → Integrations → enable MCP, and copy the connection URL.
 
-## 9. Operating it
+## 9. Ports and endpoints, as measured
+
+Audited on a stack built from this file, 2026-09-18. Docker's embedded DNS
+(127.0.0.11) appears in every container and is omitted.
+
+| service | listens on | bound to | published to host |
+| --- | --- | --- | --- |
+| penpot-frontend-public | 8080 | container network | `127.0.0.1:9002` |
+| penpot-frontend-local | 8080 | container network | `127.0.0.1:9001` |
+| penpot-backend | 6060 | container network | no |
+| penpot-backend | 6063 (PREPL) | **127.0.0.1 inside its own container** | no |
+| penpot-exporter | 6061 | container network | no |
+| penpot-mcp | 4401, 4402 | container network | no |
+| penpot-mcp | **4403 (REPL)** | container network | no |
+| penpot-postgres | 5432 | container network | no |
+| penpot-valkey | 6379 | container network | no |
+| penpot-mailcatch | 1025, 1080 | container network | `127.0.0.1:1080` |
+
+Only the two nginx ports and the mail catcher reach the host, all on loopback.
+Only `penpot-frontend-public` is meant to reach the tunnel.
+
+PREPL is better protected than it first appears: it binds loopback *inside* the
+backend container, so no other container can reach it either.
+
+### The MCP REPL on 4403 needs a decision
+
+The stock MCP image starts an HTTP REPL on 4403 that this compose file cannot
+turn off: `PENPOT_MCP_REPL_ENABLE` does not exist in the 2.17 bundle. It serves
+a web console at `/` and accepts `POST /execute` with a `code` body, which it
+runs against the connected Penpot plugin. **There is no authentication on it** —
+measured from a neighbouring container, `GET /` returns 200 and `/execute`
+returns 500 only because no plugin was attached, not because it was refused.
+
+It is not published to the host and nginx does not proxy it, so the blast radius
+is the `penpot` Docker network. Three ways to handle that, in order of cost:
+
+1. **Attach nothing else to the `penpot` network.** It is declared in this file
+   and used only by these services. This is the default and is adequate.
+2. **Upgrade past 2.17 when available.** Later builds gate the REPL behind
+   `PENPOT_MCP_REPL_ENABLE`, and it then does not listen at all.
+3. Mount a locally built MCP server that has the gate. This works but forks the
+   server, and the server and the frontend-bundled plugin must then be upgraded
+   as a matched pair. Not worth it for this alone.
+
+### HTTP surface through nginx
+
+Nineteen routable locations. The ones that matter: `/api` (156 RPC commands on
+`/api/rpc/command/:method-name`, all session-gated), `/ws/notifications`,
+`/mcp/ws`, `/mcp/stream`, `/mcp/sse`, `/api/export`, `/readyz`. The rest serve
+static assets, plugins, fonts and the SPA. `/internal/assets` carries nginx's
+`internal` directive and cannot be requested from outside.
+
+The MCP server itself exposes three HTTP routes on 4401 — `/mcp`, `/sse`,
+`/messages` — plus the plugin WebSocket on 4402 and the REPL above.
+
+## 10. Operating it
 
 **Back up two things**: the Postgres database and the assets volume.
 
@@ -167,7 +222,7 @@ it. Losing or changing it invalidates all sessions and pending invitations.
 advisories and upgrade deliberately; read the release notes first, because
 database migrations run on start.
 
-## 10. Limits and traps
+## 11. Limits and traps
 
 - **Cloudflare caps request bodies** well below Penpot's 350 MiB on
   non-Enterprise plans (100 MB at the time of writing). Large `.penpot`
@@ -178,14 +233,15 @@ database migrations run on start.
 - **Mailcatch holds every message the instance sends**, password-reset links
   included. It is bound to loopback on purpose. Never route it through the
   tunnel. Point `PENPOT_SMTP_*` at a real relay if resets must work off-host.
-- **The PREPL server is an unauthenticated REPL into the backend JVM.** It is
-  required by `manage.py` and listens only inside the container on 6063.
-  Publishing that port is total compromise; do not.
+- **Two unauthenticated REPLs run inside the network**: the backend's PREPL on
+  6063, which `manage.py` needs and which binds loopback inside its own
+  container, and the MCP server's on 4403, which does not. Section 9 measures
+  both and says what to do about the second.
 - **`disable-login-with-password` on the public frontend is cosmetic.** It
   hides the form. The backend still accepts passwords, because the agent needs
   them. Cloudflare Access is the real gate.
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 **Login redirects to Authelia and returns to an error.** The browser leg
 worked and the server leg did not. Check `PENPOT_SSRF_ALLOWED_HOSTS`, then
@@ -211,17 +267,18 @@ suspended tab. Either the MCP server and the frontend-bundled MCP plugin are
 different versions, or a browser profile is serving a cached copy of the old
 plugin. Both are covered in `mcp/packages/host/README.md`.
 
-## 12. What was and was not tested
+## 13. What was and was not tested
 
 Verified on a real stack built from this compose file, on 2026-09-18: both
 frontends render the correct `PENPOT_PUBLIC_URI` and flag sets; the hardened
 `Secure` cookie is accepted over `http://localhost` (Chromium treats loopback
 as a trustworthy origin); `manage.py` account creation; agent login; and the
 full MCP path — `execute_code`, `high_level_overview`, `penpot_api_info` and
-`export_shape` — driving a file with no human tab open.
+`export_shape` — driving a file with no human tab open. The port table in
+section 9 was read from the running containers, not inferred.
 
 **Not tested**: the Cloudflare tunnel, the Access policy, and the Authelia OIDC
 round trip. The Authelia endpoint URLs were read from the live discovery
 document at `https://id.ihate.work/.well-known/openid-configuration`, but no
-login has been performed through them. Expect section 11 to earn its keep on
+login has been performed through them. Expect section 12 to earn its keep on
 first run.
