@@ -100,14 +100,15 @@ the page loads, authenticates and opens its websockets, but `team-container*`
 renders nothing and the plugin never starts — a blank page with a clean
 console.
 
-## Watching it work: `run.sh`
+## Watching it work
 
-`host.js` runs the browser; `run.sh` runs the browser **and** an MCP server
-together in the foreground, which is what you want when observing rather than
-deploying. Ctrl-C stops both.
+`host.js` runs the browser and nothing else. To run it together with an MCP
+server in the foreground — the shape you want when observing rather than
+deploying — use `deploy/home-cluster/run-mcp-worker`, which wraps both and
+stops both on Ctrl-C:
 
-    ./run.sh --env-file <env> --mcp builtin --headed
-    ./run.sh --env-file <env> --mcp local --multi-user --host 0.0.0.0 --port 4501
+    ./run-mcp-worker --env-file worker/worker.env --mcp builtin --headed
+    ./run-mcp-worker --env-file worker/worker.env --mcp local --host 0.0.0.0 --port 4501
 
 `--mcp builtin` starts no server and lets the plugin use the one the instance
 already serves. `--mcp local` starts the build in `../server/dist` and injects

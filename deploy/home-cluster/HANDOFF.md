@@ -5,7 +5,7 @@ discussion. Written 2026-09-18.
 
 Penpot is a self-hosted design tool. This deployment serves people over the
 public internet behind Cloudflare Access with Authelia as the identity
-provider, and serves an automation agent over a private path that never
+provider, and serves an MCP worker over a private path that never
 touches Cloudflare.
 
 ## 1. Shape of the thing
@@ -15,8 +15,8 @@ people                                                      shared backend
   browser ─▶ Cloudflare Access ─▶ cloudflared ─▶ frontend-public :9002 ─┐
                GitHub / Authelia                                        │
                                                                         ├─▶ backend  :6060
-agent                                                                   │   exporter :6061
-  headless browser ────────────────────────────▶ frontend-local :9001 ──┘   mcp :4401 :4402
+worker                                                                  │   exporter :6061
+  browser (worker) ────────────────────────────▶ frontend-local :9001 ──┘   mcp :4401 :4402
   MCP client ─────────────────────────────────▶ same, /mcp/stream           postgres / valkey
 ```
 
@@ -36,11 +36,11 @@ policy on the hostname. If `cloudflared` runs as a container here instead, use
 compose network, needing no published port at all.
 
 **Nothing else goes to the tunnel.** Not `penpot-frontend-local` (port 9001,
-the agent path, no Access in front of it), and above all not the mail catcher,
+the worker path, no Access in front of it), and above all not the mail catcher,
 whose web UI lists every password-reset link the instance sends.
 
 The frontends bind `${PENPOT_BIND}`, `0.0.0.0` by default, so an ingress or an
-agent on another host can reach them. That also means **anything on the LAN
+worker on another host can reach them. That also means **anything on the LAN
 reaches port 9002 without passing Cloudflare Access**. On a network where that
 matters, set `PENPOT_BIND=127.0.0.1` and run cloudflared on this host.
 
@@ -55,7 +55,7 @@ the API, the notifications socket, the worker, and the MCP socket
 nginx origin, so it cannot be split by path either.
 
 One value cannot be both `https://penpot.example.org` and
-`http://localhost:9001`. Set it to the public host and the agent still dials
+`http://localhost:9001`. Set it to the public host and the worker still dials
 that hostname, lands on Cloudflare Access, and fails with no credential. So
 each audience gets its own nginx. They are cheap: static assets and a config file.
 
@@ -72,8 +72,8 @@ host-only cookie against the same account. Verified on the real stack.
 - A Cloudflare tunnel and an Access application for that hostname.
 - An OIDC client registered in Authelia (`https://id.ihate.work`).
 - Backup storage for one Postgres database and one assets volume.
-- A checkout of this repository on the Docker host. The agent container mounts
-  it read-only; nothing else needs it.
+- A checkout of this repository on the Docker host. The worker container
+  mounts it read-only; nothing else needs it.
 
 Everything runs in containers. Nothing needs Node, pnpm or a browser installed
 on the host.
@@ -143,30 +143,35 @@ cluster has no internal route to Authelia, set it equal to
 listed in `PENPOT_SSRF_ALLOWED_HOSTS`, or the backend refuses the token call
 and login dies after the redirect.
 
-## 7. Create the agent account
+## 7. Create the worker account
 
 Registration is disabled, so accounts are made on the command line. People get
-theirs automatically on first SSO login (`enable-oidc-registration`); the agent
-needs a password, because its login is non-interactive.
+theirs automatically on first SSO login (`enable-oidc-registration`); the MCP
+worker needs a password, because its login is non-interactive.
+
+"Worker" rather than "agent" throughout: the worker is the browser that hosts
+Penpot's MCP plugin and executes what arrives over the transport. Whatever
+connects to the other end is usually an LLM agent, and calling both the same
+thing makes every sentence ambiguous.
 
 ```bash
 docker compose exec penpot-backend python3 manage.py create-profile \
-  -n "MCP Agent" -e agent@penpot.local -p '<strong password>' \
+  -n "MCP Worker" -e worker@penpot.local -p '<strong password>' \
   --skip-tutorial --skip-walkthrough
 ```
 
 Keep this account separate from any human account. It holds a password on disk
-in the agent's browser profile, and separating it bounds the damage.
+in the worker's browser profile, and separating it bounds the damage.
 
-Then set it up: log in once as the agent, create a scratch file, enable MCP
+Then set it up: log in once as the worker, create a scratch file, enable MCP
 under Settings > Integrations, and copy the connection URL. Put all of it into
-`agent/agent.env`, copied from `agent/agent.env.example`.
+`worker/worker.env`, copied from `worker/worker.env.example`.
 
-### Run the agent as a container
+### Run the worker as a container
 
 ```bash
-docker compose --profile agent up -d penpot-agent
-docker compose logs -f penpot-agent      # ends with "plugin connected"
+docker compose --profile worker up -d penpot-mcp-worker
+docker compose logs -f penpot-mcp-worker    # ends with "plugin connected"
 ```
 
 It is a stock Playwright image with this repo mounted read-only — no build. Two
@@ -180,30 +185,51 @@ things about it are deliberate:
   the browser keeps them only for a trustworthy origin. `localhost` qualifies;
   a container hostname such as `penpot-frontend-local` does not, and the cookie
   is silently dropped — login appears to succeed and nothing works. Sharing the
-  host network namespace lets the agent say `localhost` and mean it. It is
+  host network namespace lets the worker say `localhost` and mean it. It is
   therefore not on the `penpot` network and reaches Penpot through the
   published port.
 
 The browser profile, which holds the session cookie, lives in the
-`penpot_agent_profile` volume. Deleting that volume just forces a fresh login.
+`penpot_worker_profile` volume. Deleting that volume just forces a fresh login.
 
 ### Or run it on the host
 
-`agent/host-start.sh --bg` and `agent/host-stop.sh` do the same thing outside
-Docker. That needs Node 22+, pnpm, and `pnpm exec playwright install chromium`
-in `mcp/packages/host`. Useful when iterating on the host code; the container is
-the right answer for an unattended deployment.
+`worker/worker-start.sh --bg` and `worker/worker-stop.sh` do the same thing
+outside Docker. That needs Node 22+, pnpm, and
+`pnpm exec playwright install chromium` in `mcp/packages/host`.
 
-To *watch* it work, `mcp/packages/host/run.sh` runs the browser and an MCP
-server in the foreground with `--headed`, which is worth pointing at a VNC
-desktop when something is behaving oddly. Its README covers the switches.
+### Watching it work
+
+`./run-mcp-worker` runs the browser in the foreground, and optionally an MCP
+server beside it. Point it at a VNC desktop when something is behaving oddly:
+
+```bash
+DISPLAY=:3 ./run-mcp-worker --env-file worker/worker.env --headed
+DISPLAY=:3 ./run-mcp-worker --env-file worker/worker.env --mcp local \
+    --multi-user --host 0.0.0.0 --port 4501
+```
+
+`--mcp builtin` (the default) uses the server the instance already runs;
+`--mcp local` starts the build in `mcp/packages/server/dist` and points the
+plugin at it, which is the mode for hacking on the server. `--host`, `--port`
+and `--ws-port` only mean anything there. `--help` lists the rest.
+
+`--headed` needs a DISPLAY this shell is authorised on. Run it from inside the
+VNC session, or export that session's `DISPLAY` **and** `XAUTHORITY`. When the
+cookie does not match, Playwright says only "Target page, context or browser has
+been closed" with empty browser logs; the real message is on the browser's
+stderr.
+
+Only one worker at a time: the MCP server permits one plugin connection per
+token and rejects the second, and Chromium locks the browser profile anyway.
+Stop the container before running this.
 
 Either way, the workspace URL needs **both** `team-id` and `file-id`, and an
-MCP client connects to the `PENPOT_MCP_URL` from `agent/agent.env`. That
-`userToken` is a secret granting `execute_code` against whatever file the agent
-holds open; it does not expire, and regenerating it deletes the old one.
+MCP client connects to the `PENPOT_MCP_URL` from `worker/worker.env`. That
+`userToken` is a secret granting `execute_code` against whatever file the
+worker holds open; it does not expire, and regenerating it deletes the old one.
 
-An agent on a *different* machine from Penpot forwards the port and keeps
+A worker on a *different* machine from Penpot forwards the port and keeps
 calling it localhost, for the same trustworthy-origin reason:
 
 ```bash
@@ -222,14 +248,14 @@ Each step fails differently, so do not skip ahead.
 3. Browse the public hostname. Access challenges, then Authelia, then Penpot
    loads with **no password form**.
 4. Open `http://localhost:9001` on the Penpot host — or SSH-forward 9001 from
-   elsewhere — and log in as the agent with its password. The password form
+   elsewhere — and log in as the worker with its password. The password form
    **is** present here. It must be `localhost`: a LAN hostname over plain HTTP
    is not a trustworthy origin and the `Secure` session cookie is dropped.
 5. Log in and check `Set-Cookie` carries `Secure; HttpOnly` and **no**
    `Domain`.
 6. Settings → Integrations → enable MCP, and copy the connection URL.
-7. `docker compose --profile agent up -d penpot-agent`, then
-   `docker compose logs penpot-agent` → ends with
+7. `docker compose --profile worker up -d penpot-mcp-worker`, then
+   `docker compose logs penpot-mcp-worker` → ends with
    `plugin connected to ws://localhost:9001/mcp/ws`.
 
 ## 9. Ports and endpoints, as measured
@@ -240,7 +266,7 @@ Audited on a stack built from this file, 2026-09-18. Docker's embedded DNS
 | service | listens on | bound to | published to host |
 | --- | --- | --- | --- |
 | **penpot-frontend-public** | 8080 | container network | **`${PENPOT_BIND}:9002`** ← the tunnel target |
-| penpot-frontend-local | 8080 | container network | `${PENPOT_BIND}:9001` (agent only) |
+| penpot-frontend-local | 8080 | container network | `${PENPOT_BIND}:9001` (worker only) |
 | penpot-backend | 6060 | container network | no |
 | penpot-backend | 6063 (PREPL) | **127.0.0.1 inside its own container** | no |
 | penpot-exporter | 6061 | container network | no |
@@ -322,7 +348,7 @@ database migrations run on start.
   container, and the MCP server's on 4403, which does not. Section 9 measures
   both and says what to do about the second.
 - **`disable-login-with-password` on the public frontend is cosmetic.** It
-  hides the form. The backend still accepts passwords, because the agent needs
+  hides the form. The backend still accepts passwords, because the worker needs
   them. Cloudflare Access is the real gate.
 
 ## 12. Troubleshooting
@@ -356,10 +382,11 @@ plugin. Both are covered in `mcp/packages/host/README.md`.
 Verified on a real stack built from this compose file, on 2026-09-18: both
 frontends render the correct `PENPOT_PUBLIC_URI` and flag sets; the hardened
 `Secure` cookie is accepted over `http://localhost` (Chromium treats loopback
-as a trustworthy origin); `manage.py` account creation; agent login; and the
+as a trustworthy origin); `manage.py` account creation; worker login; and the
 full MCP path — `execute_code`, `high_level_overview`, `penpot_api_info` and
 `export_shape` — driving a file with no human tab open, run both from
-`agent/host-start.sh` on the host and from the `penpot-agent` container. The
+`worker/worker-start.sh` on the host and from the `penpot-mcp-worker`
+container, and `run-mcp-worker --headed` was driven on a VNC display. The
 port table in section 9 was read from the running containers, not inferred.
 
 **Not tested**: the Cloudflare tunnel, the Access policy, and the Authelia OIDC

@@ -1,4 +1,5 @@
-## Penpot for a home cluster: Authelia SSO for people, a private path for agents.
+## Penpot for a home cluster: Authelia SSO for people, a private path for the
+## MCP worker.
 ##
 ## Derived from docker/images/docker-compose.yaml. Read HANDOFF.md before
 ## changing anything here; several values look arbitrary and are not.
@@ -23,7 +24,7 @@ networks:
 volumes:
   penpot_postgres_v15:
   penpot_assets:
-  penpot_agent_profile:
+  penpot_worker_profile:
 
 services:
   ## ---------------------------------------------------------------- frontends
@@ -45,7 +46,7 @@ services:
     networks: [penpot]
     environment:
       # disable-login-with-password hides the password form. This is COSMETIC:
-      # the backend still accepts passwords (the agent account needs that), and
+      # the backend still accepts passwords (the worker account needs that), and
       # frontend flags only drive the UI. Cloudflare Access is the real gate.
       PENPOT_FLAGS: !!str >-
         ${PENPOT_FLAGS_BASE}
@@ -54,13 +55,13 @@ services:
       PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "${PENPOT_MAX_BODY}"
       PENPOT_HTTP_SERVER_MAX_MULTIPART_BODY_SIZE: "${PENPOT_MAX_BODY}"
 
-  # Agent path: no Cloudflare anywhere in it. OIDC is hidden here (its
+  # Worker path: no Cloudflare anywhere in it. OIDC is hidden here (its
   # redirect_uri points at the public host and cannot come back here) and the
-  # password form is shown, because the agent logs in with a password.
+  # password form is shown, because the worker logs in with a password.
   #
-  # PENPOT_LOCAL_URI must be an origin the agent's BROWSER considers
+  # PENPOT_LOCAL_URI must be an origin the worker's BROWSER considers
   # trustworthy, because session cookies carry Secure once hardened. localhost
-  # qualifies over plain http; a LAN hostname does not. An agent on another
+  # qualifies over plain http; a LAN hostname does not. A worker on another
   # machine therefore SSH-forwards this port and still calls it localhost.
   penpot-frontend-local:
     image: "penpotapp/frontend:${PENPOT_VERSION}"
@@ -93,7 +94,7 @@ services:
     networks: [penpot]
     environment:
       # The backend enforces auth; it keeps login-with-password enabled (default)
-      # so the agent account can log in non-interactively.
+      # so the worker account can log in non-interactively.
       PENPOT_FLAGS: "${PENPOT_FLAGS_BASE}"
       # Emails and the OIDC redirect_uri are built from this, so it is the
       # PUBLIC host even though one frontend is loopback.
@@ -207,7 +208,9 @@ services:
       - "${PENPOT_MAILCATCH_BIND}:${PENPOT_MAILCATCH_PORT}:1080"
     networks: [penpot]
 
-  ## The headless MCP agent, inert unless started with `--profile agent`.
+  ## The MCP worker: the browser that hosts Penpot's MCP plugin. Inert unless
+  ## started with `--profile worker`. Named worker, not agent, because the thing
+  ## on the other end of the MCP transport is an agent too.
   ##
   ## A stock Playwright image with this repo mounted -- no build. Its tag must
   ## match the playwright version in mcp/packages/host/package.json, because the
@@ -217,16 +220,16 @@ services:
   ## network_mode: host is not laziness. Hardened session cookies are Secure, so
   ## the browser only keeps them for a trustworthy origin; localhost qualifies
   ## and a container hostname like penpot-frontend-local does not. Sharing the
-  ## host's network namespace lets the agent say localhost and mean it. It is
+  ## host's network namespace lets the worker say localhost and mean it. It is
   ## therefore NOT on the penpot network and reaches Penpot through the
   ## published port, so PENPOT_BIND must stay reachable on loopback.
-  penpot-agent:
+  penpot-mcp-worker:
     image: "mcr.microsoft.com/playwright:v${PLAYWRIGHT_VERSION}-noble"
     restart: always
-    profiles: [agent]
+    profiles: [worker]
     network_mode: host
     working_dir: /repo/mcp/packages/host
-    env_file: [agent/agent.env]
+    env_file: [worker/worker.env]
     environment:
       PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
       # Inside the container the profile lives on the named volume below, not
@@ -234,7 +237,7 @@ services:
       PENPOT_PROFILE_DIR: /profile
     volumes:
       - "${PENPOT_SRC:-../..}:/repo:ro"
-      - penpot_agent_profile:/profile
+      - penpot_worker_profile:/profile
     # Log in if the stored session is gone, then hold the file open.
     command: >-
       bash -lc "node spikes/login.js && node host.js"

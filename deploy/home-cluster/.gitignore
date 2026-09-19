@@ -1,5 +1,5 @@
 # Real configuration: secrets, hostnames, tokens. Only the examples are tracked.
 .env
-agent/agent.env
-agent/host.log
-agent/host.pid
+worker/worker.env
+worker/worker.log
+worker/worker.pid

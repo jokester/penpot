@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 #
-# Run the MCP server and the browser host together, in the foreground.
+# Run the MCP worker in the foreground: the browser that hosts Penpot's MCP
+# plugin, and optionally the MCP server it talks to.
+#
+# "Worker" rather than "agent" on purpose -- the thing on the other end of the
+# MCP transport is an agent too, and only one of them is a browser.
 #
 # Intended for watching the thing work -- point it at a VNC desktop with
-# --headed and you can see the Penpot tab the agent is driving. Ctrl-C stops
+# --headed and you can see the Penpot tab the worker is driving. Ctrl-C stops
 # both processes.
 #
-#   ./run.sh --env-file ../../../deploy/home-cluster/agent/agent.env --headed
+#   ./run-mcp-worker --env-file worker/worker.env --headed
 #
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
+# The browser host and the MCP server build both live in the repo, not here.
+HOST_DIR="$REPO/mcp/packages/host"
 
 MODE=local                # local | builtin
 HEADLESS=true
@@ -24,9 +31,9 @@ ENV_FILE=""
 
 usage() {
     cat <<'USAGE'
-Usage: run.sh [options]
+Usage: run-mcp-worker [options]
 
-  --env-file PATH    Shell env file to source first (agent.env and friends).
+  --env-file PATH    Shell env file to source first (worker/worker.env).
                      Flags below override whatever it sets.
 
   --host HOST        Address the MCP server binds        (default localhost)
@@ -111,7 +118,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [[ "$MODE" == local ]]; then
-    DIST="$HERE/../server/dist/index.js"
+    DIST="$REPO/mcp/packages/server/dist/index.js"
     [[ -f "$DIST" ]] || { echo "no server build at $DIST -- run 'pnpm run build' in mcp/" >&2; exit 1; }
 
     # The plugin ships inside the Penpot FRONTEND, and it must match the server
@@ -166,8 +173,8 @@ echo "[run] file         ${PENPOT_FILE_URL:0:96}"
 
 # Log in when there is no stored session and we were given credentials.
 if [[ -n "${PENPOT_EMAIL:-}" && -n "${PENPOT_PASSWORD:-}" ]]; then
-    node "$HERE/spikes/login.js" >/dev/null 2>&1 || true
+    node "$HOST_DIR/spikes/login.js" >/dev/null 2>&1 || true
 fi
 
-cd "$HERE"
+cd "$HOST_DIR"
 node host.js
