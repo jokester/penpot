@@ -42,9 +42,23 @@ export const MCP_MODE = process.env.PENPOT_MCP_MODE ?? (IS_LOOPBACK ? "builtin" 
 export const INJECT_WS_URI =
     MCP_MODE === "inject" ? (process.env.PENPOT_MCP_WS_URI ?? `ws://localhost:${WS_PORT}`) : null;
 
-/** True when `url` is the socket the MCP plugin uses, in either topology. */
+/**
+ * True when `url` is the socket the MCP plugin uses, in either topology.
+ *
+ * The port comes from the injected URI rather than WS_PORT, because
+ * PENPOT_MCP_WS_URI can name a different one -- which is exactly what running
+ * several single-document servers side by side does. Getting this wrong
+ * reports a healthy connection as a timeout.
+ */
 export function isPluginSocket(url) {
-    return INJECT_WS_URI ? url.includes(`:${WS_PORT}`) : url.includes("/mcp/ws");
+    if (!INJECT_WS_URI) return url.includes("/mcp/ws");
+    let port = String(WS_PORT);
+    try {
+        port = new URL(INJECT_WS_URI).port || port;
+    } catch {
+        /* fall back to WS_PORT */
+    }
+    return url.includes(`:${port}`);
 }
 
 // Nobody can click a headless tab to wake it, so make sure Chromium never
