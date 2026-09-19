@@ -58,9 +58,29 @@ services:
       # the password form, which the worker path needs; the public page shows it
       # too. That is cosmetic either way -- the backend always accepts passwords,
       # and Cloudflare Access is the real gate on the public port.
+      #
+      # enable-wasm-export is here rather than in PENPOT_FLAGS_BASE on purpose.
+      # The backend ignores it, and putting it in the shared string would
+      # recreate penpot-backend for a frontend-only rendering change -- which
+      # means interrupting whatever the workers are doing. Scoped here, a
+      # `docker compose up -d` touches only this service.
+      #
+      # What it fixes: export_shape. Without it the plugin's shape.export()
+      # round-trips through penpot-exporter, and the asset URL that comes back
+      # names PENPOT_HOST -- which a worker talking to localhost cannot fetch,
+      # so every export dies on "unable to perform fetch operation". With it,
+      # png/jpeg/webp render in the browser to a blob: URI and never leave it
+      # (frontend/src/app/main/data/exports/wasm.cljs:14). SVG is unaffected:
+      # the plugin's wasm branch covers only those three types, so SVG still
+      # goes through the exporter and still fails on a worker.
+      #
+      # Only helps files carrying the render-wasm/v1 feature, which is assigned
+      # at file creation. Check with:
+      #   select name, features from file where name = '...';
       PENPOT_FLAGS: !!str >-
         ${PENPOT_FLAGS_BASE}
         enable-login-with-password
+        enable-wasm-export
       PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "${PENPOT_MAX_BODY}"
       PENPOT_HTTP_SERVER_MAX_MULTIPART_BODY_SIZE: "${PENPOT_MAX_BODY}"
 

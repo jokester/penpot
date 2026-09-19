@@ -490,6 +490,19 @@ database migrations run on start.
   `Sec-Fetch-Site` header at all and falls through to the permissive branch, so
   agents, `curl` and the MCP server are unaffected. Measured: cross-site POST
   403, same-origin POST 200, header-less POST 200.
+- **`export_shape` needs `enable-wasm-export`, and it is frontend-only.**
+  Without it the plugin's `shape.export()` round-trips through the exporter, and
+  the asset URL that comes back names `PENPOT_HOST`. A worker talking to
+  `localhost` cannot fetch that, so every export dies on *"unable to perform
+  fetch operation"*. With the flag, png/jpeg/webp render in the browser to a
+  `blob:` URI and never leave it. Two caveats: **SVG is not covered** — the
+  plugin's wasm branch takes only those three types, so SVG still goes through
+  the exporter and still fails on a worker; and it only helps files carrying the
+  **`render-wasm/v1`** feature, which is assigned when the file is created, not
+  retroactively. Check with `select name, features from file where name = '…';`
+  The flag is set on `penpot-frontend` alone, so applying it recreates only that
+  container — but a worker keeps the flags its page loaded with, so an already
+  running worker needs a restart before it sees the change.
 - **`disable-login-with-password` on the public frontend is cosmetic.** It
   hides the form. The backend still accepts passwords, because the worker needs
   them. Cloudflare Access is the real gate.
