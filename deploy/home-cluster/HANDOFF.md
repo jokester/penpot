@@ -449,8 +449,17 @@ account created by `provision-worker` joined another account's team from an
 invitation and wrote into that team's file. The
 port table in section 9 was read from the running containers, not inferred.
 
-**Not tested**: the Cloudflare tunnel, the Access policy, and the Authelia OIDC
-round trip. The Authelia endpoint URLs were read from the live discovery
-document at `https://id.ihate.work/.well-known/openid-configuration`, but no
-login has been performed through them. Expect section 12 to earn its keep on
-first run.
+Since verified on the real deployment: the Cloudflare tunnel, the Access
+policy, and the Authelia OIDC round trip all work — a person signed in through
+Authelia and was provisioned on first login, arriving with `auth_backend =
+oidc`, exactly as `enable-oidc-registration` intends.
+
+One trap the tunnel adds, found the hard way: **Cloudflare caches
+`/js/config.js` at the edge for seven days.** Penpot serves it with
+`cache-control: public, max-age=604800` like any other static asset, but the
+frontend entrypoint rewrites it on every container start, so it is the one file
+that must never be cached. Change `PENPOT_HOST`, restart, and the site keeps
+loading the old origin with no clue why — the container is right and the edge
+is wrong. Purge it, and add a cache rule bypassing `/js/config.js` so it cannot
+happen again. The same applies to `/plugins/mcp/*` if MCP is ever exposed
+publicly.
