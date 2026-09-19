@@ -149,6 +149,12 @@ services:
     image: "penpotapp/mcp:${PENPOT_VERSION}"
     restart: always
     networks: [penpot]
+    # A port range for per-document servers started with `docker compose exec`
+    # inside this container (see run-mcp-worker --mcp exec). Publishing the
+    # range costs nothing while unused, and exec'd servers inherit the image's
+    # PENPOT_MCP_SERVER_HOST=0.0.0.0, so they are reachable on these.
+    ports:
+      - "${PENPOT_DOC_BIND:-127.0.0.1}:${PENPOT_DOC_PORT_MIN:-4601}-${PENPOT_DOC_PORT_MAX:-4608}:${PENPOT_DOC_PORT_MIN:-4601}-${PENPOT_DOC_PORT_MAX:-4608}"
 
   penpot-exporter:
     image: "penpotapp/exporter:${PENPOT_VERSION}"

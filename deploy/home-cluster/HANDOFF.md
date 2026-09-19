@@ -198,21 +198,51 @@ The browser profile, which holds the session cookie, lives in the
 outside Docker. That needs Node 22+, pnpm, and
 `pnpm exec playwright install chromium` in `mcp/packages/host`.
 
-### Watching it work
+### One worker per document
 
-`./run-mcp-worker` runs the browser in the foreground, and optionally an MCP
-server beside it. Point it at a VNC desktop when something is behaving oddly:
+Penpot's plugin API has no `openFile` — every accessor reads a single global
+current-file-id — so a browser page can only ever drive the file it has open.
+More documents means more workers, and each needs its own MCP server, because
+the server allows one plugin connection per token.
+
+`./run-mcp-worker.py` is the interactive way in: a small curses form asking for
+the account, the document, the server mode and the port, which then execs
+`./run-mcp-worker`. It lists the account's documents from the running instance,
+so the usual answer is to arrow to the right one and press Enter. `--last`
+reuses the previous answers without the form; `--dry-run` prints the command.
 
 ```bash
-DISPLAY=:3 ./run-mcp-worker --env-file worker/worker.env --headed
-DISPLAY=:3 ./run-mcp-worker --env-file worker/worker.env --mcp local \
-    --multi-user --host 0.0.0.0 --port 4501
+./run-mcp-worker.py                  # pick and start
+./run-mcp-worker.py --last           # same answers as last time
+./run-mcp-worker --mcp exec --file-id <uuid> --headed   # the shell runner
 ```
 
-`--mcp builtin` (the default) uses the server the instance already runs;
-`--mcp local` starts the build in `mcp/packages/server/dist` and points the
-plugin at it, which is the mode for hacking on the server. `--host`, `--port`
-and `--ws-port` only mean anything there. `--help` lists the rest.
+Three server modes:
+
+| `--mcp` | what it starts | when |
+| --- | --- | --- |
+| `builtin` | nothing; uses the instance's shared server | a single document |
+| `exec` | a single-user server **inside** the stock penpot-mcp container | a second, third… document |
+| `local` | the build in `mcp/packages/server/dist` | hacking on the server |
+
+`exec` is the one to reach for. It runs the same bundle that serves the plugin,
+so the two can never be version-skewed, it needs no build and no extra image,
+and single-user mode takes no token at all — your MCP client just connects to
+`http://127.0.0.1:<port>/mcp`. Ports come from the range the compose file
+publishes (`PENPOT_DOC_PORT_MIN`..`MAX`, default 4601-4608) and are picked
+automatically.
+
+Each document also gets its own browser profile, keyed by file id, so workers
+do not fight over one profile directory.
+
+Two things this had to work around, both worth knowing before changing it:
+
+- **Free ports cannot be found from the host.** Docker publishes the whole
+  range, so every port in it shows as `LISTEN` on the host whether or not
+  anything sits behind it. The runner asks the container instead.
+- **A `docker compose exec` client dying does not stop the process inside the
+  container.** The exec'd server records its pid to `/tmp/mcp-<port>.pid` and
+  the runner kills it on the way out.
 
 `--headed` needs a DISPLAY this shell is authorised on. Run it from inside the
 VNC session, or export that session's `DISPLAY` **and** `XAUTHORITY`. When the
@@ -220,9 +250,10 @@ cookie does not match, Playwright says only "Target page, context or browser has
 been closed" with empty browser logs; the real message is on the browser's
 stderr.
 
-Only one worker at a time: the MCP server permits one plugin connection per
-token and rejects the second, and Chromium locks the browser profile anyway.
-Stop the container before running this.
+The `penpot-mcp-worker` container and a `builtin` run both want the instance's
+shared server, so only one of them can hold it — the second plugin connection
+is rejected. Stop the container first, or use `--mcp exec`, which gives the new
+worker a server of its own.
 
 Either way, the workspace URL needs **both** `team-id` and `file-id`, and an
 MCP client connects to the `PENPOT_MCP_URL` from `worker/worker.env`. That

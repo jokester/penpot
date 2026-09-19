@@ -1,68 +1,74 @@
 #!/usr/bin/env bash
 #
-# Run the MCP worker in the foreground: the browser that hosts Penpot's MCP
-# plugin, and optionally the MCP server it talks to.
+# Run one MCP worker in the foreground: the browser that hosts Penpot's MCP
+# plugin, and the MCP server it talks to. Ctrl-C stops both.
 #
 # "Worker" rather than "agent" on purpose -- the thing on the other end of the
 # MCP transport is an agent too, and only one of them is a browser.
 #
-# Intended for watching the thing work -- point it at a VNC desktop with
-# --headed and you can see the Penpot tab the worker is driving. Ctrl-C stops
-# both processes.
+# One document per worker. Penpot's plugin API has no openFile: every accessor
+# reads a single global current-file-id, so a browser page can only ever drive
+# the file it has open. Run this once per document, each on its own ports.
 #
-#   ./run-mcp-worker --env-file worker/worker.env --headed
+#   ./run-mcp-worker --mcp exec --file-id <uuid>          # a second document
+#   ./run-mcp-worker --headed                             # watch the default one
 #
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-# The browser host and the MCP server build both live in the repo, not here.
 HOST_DIR="$REPO/mcp/packages/host"
 
-MODE=local                # local | builtin
+MODE=builtin              # builtin | exec | local
 HEADLESS=true
-HOST=localhost            # what the MCP server binds
-PORT=4401                 # MCP streamable HTTP
-WS_PORT=4402              # plugin WebSocket
-WS_URI=""                 # what the browser dials; derived when empty
+HOST=localhost
+PORT=""                   # empty => pick a free pair from the published range
+WS_PORT=""
+WS_URI=""
 MULTI_USER=false
 REPL=false
-ENV_FILE=""
+ENV_FILE="$HERE/worker/worker.env"
+FILE_ID=""
+PROFILE_DIR=""
 
 usage() {
     cat <<'USAGE'
 Usage: run-mcp-worker [options]
 
-  --env-file PATH    Shell env file to source first (worker/worker.env).
-                     Flags below override whatever it sets.
+Server:
+  --mcp builtin      No server of our own; the plugin uses the one the Penpot
+                     instance already serves at <origin>/mcp/ws. Default, and
+                     the only mode that needs no ports. One document only,
+                     because that server is shared.
+  --mcp exec         Start a single-user server INSIDE the stock penpot-mcp
+                     container via `docker compose exec`. Best for a second,
+                     third, ... document: it is the same bundle that serves the
+                     plugin, so the two can never be version-skewed, and it
+                     needs no build and no extra image.
+  --mcp local        Start the build in mcp/packages/server/dist. For hacking
+                     on the server; may be skewed against the stock plugin.
 
-  --host HOST        Address the MCP server binds        (default localhost)
-  --port N           MCP streamable HTTP port            (default 4401)
-  --ws-port N        Plugin WebSocket port               (default 4402)
-  --ws-uri URI       What the BROWSER dials; default ws://localhost:<ws-port>.
-                     Set this when the browser and the server disagree on the
-                     hostname, e.g. when binding 0.0.0.0.
+  --host HOST        Bind address for --mcp local            (default localhost)
+  --port N           MCP streamable HTTP port    (default: first free in range)
+  --ws-port N        Plugin WebSocket port                        (default N+1)
+  --ws-uri URI       What the BROWSER dials; default ws://localhost:<ws-port>
+  --multi-user       Require ?userToken= from clients, as the packaged image
+                     does. Off here: single-user needs no token at all.
+  --repl             Also start the server's REPL console.
 
+Document and browser:
+  --file-id UUID     Drive this file instead of the one in the env file. Also
+                     gives the browser its own profile, so several workers do
+                     not fight over one profile directory.
+  --profile DIR      Browser profile directory (overrides the above).
   --headed           Show the browser. Needs a DISPLAY you are authorised on;
-                     run it from inside the VNC session, or export the same
-                     DISPLAY and XAUTHORITY that session uses. "Authorization
-                     required, but no authorization protocol specified" means
-                     the cookie does not match, not that the flag is wrong.
+                     run it from inside the VNC session, or export that
+                     session's DISPLAY and XAUTHORITY. "Authorization required,
+                     but no authorization protocol specified" means the cookie
+                     does not match, not that the flag is wrong.
   --headless         Hide it (default).
 
-  --mcp local        Start our own MCP server and point the plugin at it
-                     (default). This is the only mode where --host/--port mean
-                     anything.
-  --mcp builtin      Start no server; the plugin uses the one the Penpot
-                     instance already serves at <origin>/mcp/ws.
-
-  --multi-user       Pass --multi-user to the server, as the packaged image
-                     does. Required if your client sends ?userToken=.
-  --repl             Also start the server's REPL console (off by default).
-
-Required in the environment or the env file:
-  PENPOT_ORIGIN, PENPOT_FILE_URL, and a logged-in PENPOT_PROFILE_DIR
-  (or PENPOT_EMAIL / PENPOT_PASSWORD so it can log in).
+  --env-file PATH    Defaults to worker/worker.env. Flags override it.
 USAGE
 }
 
@@ -73,6 +79,8 @@ while [[ $# -gt 0 ]]; do
         --port)     PORT="$2"; shift 2 ;;
         --ws-port)  WS_PORT="$2"; shift 2 ;;
         --ws-uri)   WS_URI="$2"; shift 2 ;;
+        --file-id)  FILE_ID="$2"; shift 2 ;;
+        --profile)  PROFILE_DIR="$2"; shift 2 ;;
         --headed)   HEADLESS=false; shift ;;
         --headless) HEADLESS=true; shift ;;
         --mcp)      MODE="$2"; shift 2 ;;
@@ -83,95 +91,140 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -n "$ENV_FILE" ]]; then
-    [[ -f "$ENV_FILE" ]] || { echo "no such env file: $ENV_FILE" >&2; exit 2; }
-    set -a; source "$ENV_FILE"; set +a
-fi
+case "$MODE" in builtin|exec|local) ;; *) echo "--mcp must be builtin, exec or local" >&2; exit 2 ;; esac
 
-[[ "$MODE" == local || "$MODE" == builtin ]] || { echo "--mcp must be local or builtin" >&2; exit 2; }
-: "${PENPOT_ORIGIN:?set PENPOT_ORIGIN (or pass --env-file)}"
-: "${PENPOT_FILE_URL:?set PENPOT_FILE_URL (or pass --env-file)}"
+[[ -f "$ENV_FILE" ]] || { echo "no such env file: $ENV_FILE" >&2; exit 2; }
+set -a; source "$ENV_FILE"; set +a
+
+: "${PENPOT_ORIGIN:?set PENPOT_ORIGIN in $ENV_FILE}"
+: "${PENPOT_FILE_URL:?set PENPOT_FILE_URL in $ENV_FILE}"
+
+# --file-id retargets the URL and isolates the profile, so two workers started
+# from the same env file do not collide on the browser profile lock.
+if [[ -n "$FILE_ID" ]]; then
+    PENPOT_FILE_URL="$(sed -E "s/file-id=[0-9a-fA-F-]+/file-id=$FILE_ID/" <<<"$PENPOT_FILE_URL")"
+    [[ -z "$PROFILE_DIR" ]] && PROFILE_DIR="$HOME/.cache/penpot-headless/profile-${FILE_ID:0:8}"
+fi
+[[ -n "$PROFILE_DIR" ]] && export PENPOT_PROFILE_DIR="$PROFILE_DIR"
+export PENPOT_FILE_URL
 
 if [[ "$HEADLESS" == false ]]; then
-    if [[ -z "${DISPLAY:-}" ]]; then
-        echo "--headed needs DISPLAY. Inside VNC, export DISPLAY=:1 (or whatever" >&2
-        echo "the VNC server uses) before running this." >&2
+    [[ -n "${DISPLAY:-}" ]] || { echo "--headed needs DISPLAY (inside VNC, e.g. :3)" >&2; exit 2; }
+    if command -v xdpyinfo >/dev/null 2>&1 && ! xdpyinfo >/dev/null 2>&1; then
+        echo "cannot open DISPLAY=$DISPLAY -- set XAUTHORITY to that session's file." >&2
         exit 2
-    fi
-    # Authorisation is the usual failure, and Playwright reports it only as
-    # "Target page, context or browser has been closed" with empty browser
-    # logs, which sends people looking in the wrong place.
-    if command -v xdpyinfo >/dev/null 2>&1; then
-        xdpyinfo >/dev/null 2>&1 || {
-            echo "cannot open DISPLAY=$DISPLAY. Set XAUTHORITY to the file that" >&2
-            echo "session uses, or run this from inside the VNC desktop." >&2
-            exit 2
-        }
     fi
 fi
 
+# Ports in use by servers already running inside the penpot-mcp container.
+#
+# The host cannot answer this: docker publishes the whole range, so every port
+# in it shows as LISTEN on the host whether or not anything sits behind it.
+# Only the container knows, so ask it.
+ports_busy_in_container() {
+    local hex
+    # The container prints hex (its awk has no strtonum); bash converts.
+    # awk is invoked directly rather than through `sh -c`: the extra quoting
+    # layer silently ate the program and the probe returned nothing, which
+    # would have made every port look free.
+    hex="$( (cd "$HERE" && docker compose exec -T penpot-mcp \
+        awk '$4=="0A" {split($2,a,":"); print a[2]}' /proc/net/tcp) 2>/dev/null )" || return 0
+    local h
+    for h in $hex; do
+        [[ "$h" =~ ^[0-9A-Fa-f]+$ ]] && echo "$((16#$h))"
+    done
+}
+
+# Pick the first free HTTP/WS pair from the range the compose file publishes.
+pick_ports() {
+    local lo="${PENPOT_DOC_PORT_MIN:-4601}" hi="${PENPOT_DOC_PORT_MAX:-4608}" p busy
+    busy="$(ports_busy_in_container)"
+    for ((p = lo; p + 1 <= hi; p += 2)); do
+        if ! grep -qx -e "$p" -e "$((p + 1))" <<<"$busy"; then
+            PORT="$p"; WS_PORT="$((p + 1))"; return 0
+        fi
+    done
+    echo "no free port pair in $lo-$hi; raise PENPOT_DOC_PORT_MAX or stop a worker." >&2
+    return 1
+}
+
 SERVER_PID=""
+EXEC_PIDFILE=""
 cleanup() {
+    # A `docker compose exec` client dying does NOT stop the process inside the
+    # container, so it is killed by the pid it recorded on the way up.
+    if [[ -n "$EXEC_PIDFILE" ]]; then
+        (cd "$HERE" && docker compose exec -T penpot-mcp sh -c \
+            "kill \$(cat $EXEC_PIDFILE) 2>/dev/null; rm -f $EXEC_PIDFILE" >/dev/null 2>&1) || true
+    fi
     [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null || true
     wait 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
-if [[ "$MODE" == local ]]; then
+if [[ "$MODE" != builtin ]]; then
+    [[ -n "$PORT" ]] || pick_ports
+    [[ -n "$WS_PORT" ]] || WS_PORT="$((PORT + 1))"
+    [[ -n "$WS_URI" ]] || WS_URI="ws://localhost:$WS_PORT"
+fi
+
+case "$MODE" in
+exec)
+    EXEC_PIDFILE="/tmp/mcp-$PORT.pid"
+    echo "[run] MCP server  exec in penpot-mcp   http://127.0.0.1:$PORT/mcp   ws://localhost:$WS_PORT"
+    args=""; [[ "$MULTI_USER" == true ]] && args="--multi-user"
+    (
+        cd "$HERE"
+        docker compose exec -T \
+            -e PENPOT_MCP_SERVER_PORT="$PORT" \
+            -e PENPOT_MCP_WEBSOCKET_PORT="$WS_PORT" \
+            -e PENPOT_MCP_REPL_ENABLE="$REPL" \
+            penpot-mcp sh -c "echo \$\$ > $EXEC_PIDFILE; exec node index.js $args"
+    ) &
+    SERVER_PID=$!
+    export PENPOT_MCP_MODE=inject PENPOT_MCP_WS_URI="$WS_URI"
+    ;;
+local)
     DIST="$REPO/mcp/packages/server/dist/index.js"
-    [[ -f "$DIST" ]] || { echo "no server build at $DIST -- run 'pnpm run build' in mcp/" >&2; exit 1; }
-
-    # The plugin ships inside the Penpot FRONTEND, and it must match the server
-    # we are about to start. A newer server expects a heartbeat an older plugin
-    # never sends, and the failure claims the browser tab is suspended.
+    [[ -f "$DIST" ]] || { echo "no build at $DIST -- run 'pnpm run build' in mcp/" >&2; exit 1; }
     plugin_js="$(curl -fsS --max-time 5 "${PENPOT_ORIGIN}/plugins/mcp/index.js" 2>/dev/null || true)"
-    if [[ -n "$plugin_js" ]] && ! grep -q heartbeat <<<"$plugin_js" \
-       && grep -q heartbeat "$DIST"; then
-        echo "WARNING: the plugin served by $PENPOT_ORIGIN sends no heartbeat," >&2
-        echo "  but this server build expects one. Every tool call will fail with" >&2
-        echo "  'the Penpot plugin tab appears to be suspended'. Either mount the" >&2
-        echo "  matching build of mcp/packages/plugin/dist over the frontend's" >&2
-        echo "  /var/www/app/plugins/mcp, or use --mcp builtin." >&2
+    if [[ -n "$plugin_js" ]] && ! grep -q heartbeat <<<"$plugin_js" && grep -q heartbeat "$DIST"; then
+        echo "WARNING: the plugin served by $PENPOT_ORIGIN sends no heartbeat, but this" >&2
+        echo "  server build expects one. Every tool call will fail with 'the Penpot" >&2
+        echo "  plugin tab appears to be suspended'. Use --mcp exec instead, which runs" >&2
+        echo "  the same bundle that serves the plugin." >&2
     fi
-
-    args=()
-    [[ "$MULTI_USER" == true ]] && args+=(--multi-user)
-
     echo "[run] MCP server  http://$HOST:$PORT/mcp   ws://$HOST:$WS_PORT"
-    # ConfigurationLoader resolves data/ against process.cwd(), so the server
-    # has to start from the directory holding index.js -- exactly as the
-    # packaged image does.
+    args=(); [[ "$MULTI_USER" == true ]] && args+=(--multi-user)
+    # ConfigurationLoader resolves data/ against process.cwd().
     (
         cd "$(dirname "$DIST")"
-        PENPOT_MCP_SERVER_HOST="$HOST" \
-        PENPOT_MCP_SERVER_PORT="$PORT" \
-        PENPOT_MCP_WEBSOCKET_PORT="$WS_PORT" \
-        PENPOT_MCP_REPL_ENABLE="$REPL" \
+        PENPOT_MCP_SERVER_HOST="$HOST" PENPOT_MCP_SERVER_PORT="$PORT" \
+        PENPOT_MCP_WEBSOCKET_PORT="$WS_PORT" PENPOT_MCP_REPL_ENABLE="$REPL" \
         exec node index.js "${args[@]}"
     ) &
     SERVER_PID=$!
+    export PENPOT_MCP_MODE=inject PENPOT_MCP_WS_URI="$WS_URI"
+    ;;
+builtin)
+    export PENPOT_MCP_MODE=builtin
+    echo "[run] MCP server  the instance's own, at $PENPOT_ORIGIN/mcp/ws"
+    ;;
+esac
 
-    # The browser must reach the socket by a name it can resolve; 0.0.0.0 is a
-    # bind address, not a destination.
-    if [[ -z "$WS_URI" ]]; then WS_URI="ws://localhost:$WS_PORT"; fi
-    export PENPOT_MCP_MODE=inject PENPOT_MCP_WS_URI="$WS_URI" PENPOT_MCP_WEBSOCKET_PORT="$WS_PORT"
-
-    # Give it a moment to bind before the page tries to dial it.
-    for _ in $(seq 1 30); do
+if [[ "$MODE" != builtin ]]; then
+    for _ in $(seq 1 40); do
         kill -0 "$SERVER_PID" 2>/dev/null || { echo "[run] server exited early" >&2; exit 1; }
-        curl -fsS -o /dev/null --max-time 1 "http://localhost:$PORT/mcp" 2>/dev/null && break
+        curl -fsS -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/mcp" 2>/dev/null && break
         sleep 0.5
     done
-else
-    export PENPOT_MCP_MODE=builtin
-    echo "[run] using the instance's own MCP server at $PENPOT_ORIGIN/mcp/ws"
+    echo "[run] MCP client  http://127.0.0.1:$PORT/mcp"
 fi
 
 export PENPOT_HOST_HEADLESS="$HEADLESS"
-echo "[run] browser      headless=$HEADLESS display=${DISPLAY:-none}"
-echo "[run] file         ${PENPOT_FILE_URL:0:96}"
+echo "[run] browser      headless=$HEADLESS display=${DISPLAY:-none} profile=${PENPOT_PROFILE_DIR:-default}"
+echo "[run] document     ${PENPOT_FILE_URL:0:100}"
 
-# Log in when there is no stored session and we were given credentials.
 if [[ -n "${PENPOT_EMAIL:-}" && -n "${PENPOT_PASSWORD:-}" ]]; then
     node "$HOST_DIR/spikes/login.js" >/dev/null 2>&1 || true
 fi

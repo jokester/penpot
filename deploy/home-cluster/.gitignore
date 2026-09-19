@@ -3,3 +3,4 @@
 worker/worker.env
 worker/worker.log
 worker/worker.pid
+__pycache__/
