@@ -316,6 +316,14 @@ and single-user mode takes no token at all — your MCP client just connects to
 publishes (`PENPOT_DOC_PORT_MIN`..`MAX`, default 4601-4608) and are picked
 automatically.
 
+**Let it pick them.** A `--port` outside that range starts a server that works
+perfectly and that nothing can reach: the MCP client gets `ConnectionRefused`,
+and since the browser runs on the host too, the plugin cannot reach the
+WebSocket either, so the worker sits connected to nothing. Both the HTTP port
+and the WebSocket port (HTTP + 1 unless `--ws-port` says otherwise) have to be
+inside the range. `run-mcp-worker` now refuses out-of-range and already-taken
+ports instead of starting something unreachable.
+
 Each document also gets its own browser profile, keyed by file id, so workers
 do not fight over one profile directory.
 

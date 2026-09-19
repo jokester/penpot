@@ -167,8 +167,13 @@ ports_busy_in_container() {
     # awk is invoked directly rather than through `sh -c`: the extra quoting
     # layer silently ate the program and the probe returned nothing, which
     # would have made every port look free.
+    #
+    # BOTH tcp and tcp6. The MCP server binds its HTTP port on IPv4 and its
+    # WebSocket port on IPv6, so reading only /proc/net/tcp reports every
+    # WebSocket port as free -- and pick_ports then hands out a port that is
+    # already serving, producing two servers that half-work.
     hex="$( (cd "$HERE" && docker compose exec -T penpot-mcp \
-        awk '$4=="0A" {split($2,a,":"); print a[2]}' /proc/net/tcp) 2>/dev/null )" || return 0
+        awk '$4=="0A" {split($2,a,":"); print a[2]}' /proc/net/tcp /proc/net/tcp6) 2>/dev/null )" || return 0
     local h
     for h in $hex; do
         [[ "$h" =~ ^[0-9A-Fa-f]+$ ]] && echo "$((16#$h))"
@@ -210,6 +215,40 @@ if [[ "$MODE" != builtin ]]; then
     [[ -n "$PORT" ]] || pick_ports
     [[ -n "$WS_PORT" ]] || WS_PORT="$((PORT + 1))"
     [[ -n "$WS_URI" ]] || WS_URI="ws://localhost:$WS_PORT"
+fi
+
+# In exec mode the server lives inside penpot-mcp and is reachable only on the
+# range the compose file publishes. A port outside it starts a server that works
+# perfectly and that nothing can reach: the MCP client gets ConnectionRefused,
+# and -- because the browser runs on the host too -- the plugin never reaches
+# the WebSocket either, so the worker sits there connected to nothing.
+if [[ "$MODE" == exec ]]; then
+    lo="${PENPOT_DOC_PORT_MIN:-4601}" hi="${PENPOT_DOC_PORT_MAX:-4608}"
+    for pair in "HTTP:$PORT" "WebSocket:$WS_PORT"; do
+        name="${pair%%:*}" value="${pair##*:}"
+        if (( value < lo || value > hi )); then
+            cat >&2 <<MSG
+$name port $value is outside the published range $lo-$hi, so nothing on this
+host could reach it. docker-compose.yaml publishes only that range; raise
+PENPOT_DOC_PORT_MAX and recreate penpot-mcp to widen it, pick a port inside it,
+or drop --port and let a free pair be chosen.
+MSG
+            exit 2
+        fi
+    done
+    busy="$(ports_busy_in_container)"
+    for pair in "HTTP:$PORT" "WebSocket:$WS_PORT"; do
+        name="${pair%%:*}" value="${pair##*:}"
+        if grep -qx "$value" <<<"$busy"; then
+            free=""
+            for ((q = lo; q <= hi; q++)); do
+                grep -qx "$q" <<<"$busy" || free+="$q "
+            done
+            echo "$name port $value is already in use inside penpot-mcp." >&2
+            echo "Free ports in $lo-$hi right now: ${free:-none}" >&2
+            exit 2
+        fi
+    done
 fi
 
 case "$MODE" in
@@ -286,7 +325,11 @@ if [[ "$BROWSER" == host ]]; then
         node "$HOST_DIR/spikes/login.js" >/dev/null 2>&1 || true
     fi
     cd "$HOST_DIR"
-    exec node host.js
+    # NOT exec: that replaces this shell and takes the EXIT trap with it, so the
+    # server started inside penpot-mcp would outlive the worker and keep its
+    # ports. Orphans are only visible from inside the container, which makes
+    # them genuinely hard to notice.
+    node host.js
 fi
 
 ## ---------------------------------------------------------------- container
