@@ -8,18 +8,25 @@ Nothing in Penpot is modified. The page loads stock Penpot, and Penpot's own
 bundled MCP plugin connects to the MCP server exactly as it would from a real
 tab. The MCP server is unmodified too: it cannot tell the difference.
 
-Two topologies are supported, and `config.js` picks between them by origin:
+`PENPOT_MCP_MODE` selects where the plugin dials, and `config.js` defaults it by
+origin: a loopback `PENPOT_ORIGIN` gets **builtin**, anything else gets
+**inject**.
 
-| | **builtin** (self-hosted) | **inject** (cloud) |
+| | **builtin** | **inject** |
 | --- | --- | --- |
-| who runs the MCP server | the instance, at `<origin>/mcp/ws` | you, separately |
+| who runs the MCP server | the instance, at `<origin>/mcp/ws` | someone else — see below |
 | injection | none — `app.config/mcp-ws-uri` already points there | `window.penpotMcpServerURI` before boot |
-| browser | Playwright's bundled Chromium | stock Chrome (Cloudflare) |
-| client endpoint | `<origin>/mcp/stream?userToken=…` | `http://localhost:4401/mcp` |
+| client endpoint | `<origin>/mcp/stream?userToken=…` | `http://localhost:<port>/mcp` |
 
-A loopback `PENPOT_ORIGIN` selects **builtin**, because the stock self-hosting
-compose (`docker/images/docker-compose.yaml`) ships a `penpot-mcp` service and
-nginx proxies it at the app's own origin. Override with `PENPOT_MCP_MODE`.
+Note that **inject is not a synonym for cloud**. It says only that the plugin was
+redirected; it does not say whose server it was redirected to. A self-hosted
+instance uses inject whenever you run a per-document server beside it
+(`run-mcp-worker --mcp exec`), which is the usual way to drive more than one
+document.
+
+See **[TOPOLOGIES.md](TOPOLOGIES.md)** for the full matrix, the cloud/self-hosted
+differences, and the version-pairing rule that decides which mode actually works
+where.
 
 ## Status
 
@@ -166,6 +173,10 @@ to wake it"*. There is no tab to click, and nothing is actually suspended.
 When running a locally built server against official images, mount the matching
 plugin build (`mcp/packages/plugin/dist` over `/var/www/app/plugins/mcp`) as
 well, or run the stock server.
+
+Which plugin sends a heartbeat is measured per instance in
+[TOPOLOGIES.md](TOPOLOGIES.md) §5 — cloud does, the 2.17 images do not, so a
+locally built server pairs with cloud and not with your own stack.
 
 **The browser profile caches the plugin.** It is an ordinary static asset, so a
 stale copy outlives the remount and reproduces the same misleading error after
