@@ -35,7 +35,13 @@ export type LaneState = "opening" | "connected" | "failed" | "closing" | "closed
  */
 export type LaneEvent =
     | { readonly state: "opening"; readonly detail: string }
-    | { readonly state: "connected"; readonly clientUrl: string; readonly document: DocumentRef }
+    | {
+          readonly state: "connected";
+          readonly clientUrl: string;
+          readonly document: DocumentRef;
+          /** Absent for a mode that runs no server of its own. */
+          readonly port?: PortPair;
+      }
     | { readonly state: "failed"; readonly reason: string; readonly log: readonly string[] };
 
 /** What to open. */
@@ -135,7 +141,7 @@ async function open(
                     });
                 }
 
-                onEvent({ state: "connected", clientUrl: exposure.url, document: spec.document });
+                onEvent({ state: "connected", clientUrl: exposure.url, document: spec.document, port: ports });
                 await until(signal);
             } finally {
                 await lease.close();

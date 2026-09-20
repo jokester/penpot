@@ -142,7 +142,7 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   cleanup happened); that a throw from `expose` still kills the server; and
   that an unbuilt mode fails with a reason naming SPEC §3b.
 
-- [ ] **T3.2 `supervisor/supervisor.ts`.** The lane set, cancellation scopes,
+- [x] **T3.2 `supervisor/supervisor.ts`.** The lane set, cancellation scopes,
   subscriptions. — acceptance: tests assert `open` rejects a second `builtin`
   lane on one account and a second lane on one document, each with a reason;
   that subscribers see every transition; and that `shutdown` past its deadline
@@ -247,6 +247,12 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   prose, API.md and IMPL-HANDOFF all say `exec/`. Fixed in T1.1.
 - 2026-09-20: **The plan lives here, not in `docs/`.** `docs/` is Penpot's
   Eleventy documentation site.
+- 2026-09-20: **A lane is keyed by a handle, not by its port.** SPEC §1 says
+  the port identifies a lane, but the port is not known until the lane has
+  asked the container what is free — so `open` cannot return one. The
+  supervisor hands out a counter id and the record carries the port once the
+  lane reports it, which is what the TUI column shows. The `connected` event
+  gained `port` for that reason.
 - 2026-09-20: **Readiness is a method on the `Lease`, not a free function
   over a `Page`.** API.md put `waitForPluginSocket(page, wiring, …)` in
   `browser/page.ts`. A lease already knows the wiring it was opened with, so
