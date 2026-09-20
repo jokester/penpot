@@ -238,7 +238,7 @@ Raised 2026-09-21 after the first proper look at the interface.
   so two lanes on different displays do not share a process; `--headed` with no
   display is still refused at parse.
 
-- [ ] **T7.3 `penpot/catalogue.ts` — teams and documents by name.** A uuid is
+- [x] **T7.3 `penpot/catalogue.ts` — teams and documents by name.** A uuid is
   not something anyone recognises. The RPC to list them already exists and is
   tested; nothing calls it yet. — acceptance: against a fake `PenpotApi`,
   documents come back as team name plus file name carrying both ids; one login
