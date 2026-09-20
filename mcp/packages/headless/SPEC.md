@@ -1,4 +1,4 @@
-# penpot-headless-mcp-launcher — architecture and spec
+# mcp-headless — architecture and spec
 
 Status: **proposed**. Nothing is implemented; this document is the thing to
 argue with before any code exists.
@@ -80,13 +80,13 @@ Three languages, two directories, one job, no tests. The specific failures:
 One process owns everything. A lane is a task, not a process:
 
 ```
-        ┌──────────── penpot-headless-mcp-launcher ─────────────┐
-        │  supervisor                                           │
-        │    ├── lane 4601  task ──▶ chromium A (child)          │
-        │    ├── lane 4603  task ──▶ chromium B (child)          │
-        │    └── lane 4605  task ──▶ chromium C (child)          │
-        │  TUI renders supervisor state, sends intents           │
-        └───────────────────────────────────────────────────────┘
+        ┌──────────────────── mcp-headless ────────────────────┐
+        │  supervisor                                          │
+        │    ├── lane 4601  task ──▶ chromium A (tab)          │
+        │    ├── lane 4603  task ──▶ chromium A (tab)          │
+        │    └── lane 4605  task ──▶ chromium B (tab, headed)  │
+        │  TUI renders supervisor state, sends intents         │
+        └──────────────────────────────────────────────────────┘
                    │ ExecBackend: compose exec | kubectl exec
                    ▼
         penpot-mcp container/pod: three `node index.js` on 4601/4603/4605
@@ -345,7 +345,7 @@ only what it started.
 One screen, two regions.
 
 ```
-  LANES                                                     penpot-headless-mcp-launcher
+  LANES                                                     mcp-headless
   port  state       document              account       browser   uptime
   4601  connected   LLM session viewer    mcp-worker    headed    2h14m
   4603  connected   diagrams              mcp-worker    headless  11m
@@ -358,7 +358,7 @@ One screen, two regions.
   document  ▸ diagrams · 00 · Explorations
   mode      ▸ exec         port ▸ 4607 (free)
   browser   ▸ headed       display ▸ :3
-  → penpot-headless-mcp-launcher --account mcp-worker --file-id fdbd… --port 4607 --headed
+  → mcp-headless --account mcp-worker --file-id fdbd… --port 4607 --headed
 ```
 
 - **The list is first.** The machine's real state before any form.
@@ -380,8 +380,7 @@ One screen, two regions.
 
 ## 8. Where it lives, and how it is built
 
-**`mcp/packages/headless-launcher/`, package `penpot-headless-mcp-launcher`,
-dependencies managed with npm.**
+**`mcp/packages/headless/`, package `mcp-headless`, managed with npm.**
 
 This is part of our MCP kit, alongside `server` and `plugin`, and it is about
 the headless worker rather than about any deployment.
@@ -414,9 +413,9 @@ The supervisor is the product; the TUI is its face. Both survive without the
 other, but the process is the same long-running thing either way.
 
 ```
-penpot-headless-mcp-launcher                    # supervise, with the TUI
-penpot-headless-mcp-launcher --no-tui [lanes…]  # supervise, logging to stdout
-penpot-headless-mcp-launcher --check            # report leftovers and exit
+mcp-headless                    # supervise, with the TUI
+mcp-headless --no-tui [lanes…]  # supervise, logging to stdout
+mcp-headless --check            # report leftovers and exit
 ```
 
 `--no-tui` is the systemd shape: open the lanes named on the command line or in
@@ -433,7 +432,7 @@ and it would leave something nobody owns.
 
 Account provisioning (`provision-worker` today) is the one genuinely separate
 job and stays a subcommand:
-`penpot-headless-mcp-launcher account <name> [--invite …] [--reset-password]`.
+`mcp-headless account <name> [--invite …] [--reset-password]`.
 
 ## 10. Configuration
 
@@ -500,9 +499,9 @@ Each cost real time to learn; each becomes an assertion with a test.
 ## 12. Module layout
 
 ```
-mcp/packages/headless-launcher/
+mcp/packages/headless/
   SPEC.md · README.md
-  package.json          bin: penpot-headless-mcp-launcher; deps: playwright
+  package.json          bin: mcp-headless; deps: playwright
   tsconfig.json         strict, noEmit
   src/
     main.ts             argv → TUI or one non-interactive command; one exit point
@@ -594,10 +593,30 @@ timeouts, restarting transparently hides a real fault, and failing the lane is
 noisy. Proposed then — bounded restarts, count visible in the TUI row, fail once
 exhausted. Not worth building until a deployment actually needs the strategy.
 
-### 14.5 `--mode builtin` against cloud — still undriven
+### 14.5 `--mode builtin` — half resolved
 
-If it works, the worker reduces to a browser and a URL and `topology.ts` gets
-simpler. Worth resolving before that module is written rather than after.
+**Self-hosted: verified working**, 2026-09-20. A worker opened with
+`--mcp builtin` dialled `ws://localhost:9001/mcp/ws`, an MCP client connected to
+`http://localhost:9001/mcp/stream?userToken=…`, and `execute_code` returned the
+real document. So builtin is a proven third mode, not a hypothesis, and
+`topology.ts` has three real branches rather than two plus a guess.
+
+That has a design consequence worth stating: **a builtin lane has one half, not
+two.** No server is started, so there is no port to allocate, no in-container
+pid to reap, no exposure to arrange, and `ExecBackend` is not touched at all.
+The lane reduces to a browser and a URL. That is also what makes §10's claim
+true — with no `deployment.json` at all, builtin still works, which is the mode
+that will run against cloud and against whatever replaces the compose file.
+
+Its limits are the familiar ones: the server is shared and multi-user, so the
+client must carry `userToken`, and two builtin lanes would contend for the same
+server.
+
+**Cloud: still undriven**, and blocked on two things rather than on the design —
+Google Chrome is not installed on this host (a non-loopback origin sets
+`channel: "chrome"` because Cloudflare challenges Playwright's headless shell),
+and it needs a cloud account with `mcpEnabled` and an `mcp`-type token. Neither
+is the launcher's problem; both are prerequisites someone has to supply.
 
 ### 14.6 One account, many documents — decided
 
@@ -610,11 +629,26 @@ one session. If that ever becomes common, `chromium.launch()` with a context per
 account and sessions kept as `storageState` would collapse them into one
 process; not worth it for one worker account.
 
-### 14.7 The name — open, and not urgent
+### 14.7 The name — decided
 
-`penpot-headless-mcp-launcher` names the first half of the job. The thing
-launches lanes and then supervises them for as long as it runs, and the second
-half is where the design effort went. Keeping it is defensible — it is what you
-type, and the first thing it does is launch — but `-supervisor`, or dropping the
-verb entirely for `penpot-headless-mcp`, both describe it better. Cheap to
-change before there is code; annoying after.
+**Directory `mcp/packages/headless`, package `mcp-headless`.**
+
+Dropping the verb was right: "launcher" named the first half of a job whose
+second half — supervising lanes for as long as the process runs — is where the
+design went. A noun describes it better than a verb, and `mcp/packages/headless`
+stops the directory stuttering `mcp` at itself.
+
+The package name follows the siblings rather than the originally proposed
+`penpot-headless-mcp`. `common`, `plugin` and `server` are `mcp-common`,
+`mcp-plugin` and `mcp-server`: bare directory noun, `mcp-` prefix, unscoped,
+private. `@penpot/mcp-host` is the one exception, it is ours, inherited from the
+spike, and about to be deleted. **If this is ever published to npm the name must
+change** — `mcp-headless` is far too generic for a public registry — and
+`penpot-headless-mcp` is the right public name at that point. One line, until
+something imports it.
+
+One honest wrinkle: the package supports `--headed`, and its most-used
+debugging mode is a visible browser on a VNC display. "Headless" here means
+*unattended* — no human keeping a tab open — which is how this project has used
+the word since the `exp/headless-mcp` branch and the original host README. The
+established meaning beats the literal one.
