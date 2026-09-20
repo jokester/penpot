@@ -32,7 +32,9 @@ export type ErrorCode =
     /** Something that must be reachable is not. */
     | "unreachable"
     /** The launcher was asked for something its configuration does not describe. */
-    | "not-configured";
+    | "not-configured"
+    /** A probe of the container answered with something unreadable. */
+    | "probe-failed";
 
 /** Structured context for an error, rendered beside the message in the TUI. */
 export type ErrorDetail = Readonly<Record<string, string | number>>;

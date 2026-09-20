@@ -118,7 +118,7 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
 
 ## Milestone 2 — The container edge
 
-- [ ] **T2.1 `exec/procnet.ts`.** `parseListeningPorts(tcp, tcp6)`, pure and
+- [x] **T2.1 `exec/procnet.ts`.** `parseListeningPorts(tcp, tcp6)`, pure and
   fixture-tested, because this parser is where the IPv6 bug lived. Capture the
   fixtures once with the command in IMPL-HANDOFF §3 and commit them. —
   acceptance: the captured pair yields both the IPv4 HTTP port and the
