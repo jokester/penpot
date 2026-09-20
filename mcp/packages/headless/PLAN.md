@@ -125,7 +125,7 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   IPv6-only WebSocket port, non-`0A` rows are ignored, duplicates collapse, and
   a truncated file throws rather than returning a short list.
 
-- [ ] **T2.2 `exec/backend.ts` + `exec/compose.ts` + the contract test.** The
+- [x] **T2.2 `exec/backend.ts` + `exec/compose.ts` + the contract test.** The
   `ExecBackend` interface, a compose implementation, an in-memory fake, and one
   suite both must satisfy: start a process, see its port in `listening()`,
   expose it, kill it, see the port released. `start` resolves with an
@@ -247,6 +247,15 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   prose, API.md and IMPL-HANDOFF all say `exec/`. Fixed in T1.1.
 - 2026-09-20: **The plan lives here, not in `docs/`.** `docs/` is Penpot's
   Eleventy documentation site.
+- 2026-09-20: **`ExecBackend` gained `log(pid)`.** A failed lane's event
+  carries the last output lines (API.md), and only the backend has them. It
+  also reads the in-container pid off the process's own stream rather than out
+  of a pidfile: the wrapper shell prints `$$` and then `exec`s the real
+  command, which removes the race the shell script had between writing the
+  file and something reading it.
+- 2026-09-20: **The fake refuses to expose a port nothing serves.** Caught by
+  the contract suite on its first run: the double was more permissive than
+  compose, which is the one way a shared double is worse than none.
 - 2026-09-20: **`Wiring` also carries the server's environment.** SPEC §12
   assigns invariant 9 — REPL suppression by aiming `PENPOT_MCP_REPL_PORT` at an
   already-bound port — to `core/topology.ts`, and it belongs with the addresses
