@@ -62,9 +62,22 @@ The mode names only one of them.
    who runs the MCP server?                where does the plugin dial?
    ────────────────────────                ───────────────────────────
    the instance already does        ──▶    its own origin        = builtin
-   you start one (stock, in-place)   ─▶    wherever you say      = inject
-   you start one (your own build)    ─▶    wherever you say      = inject
+   you start one                     ─▶    wherever you say      = inject
 ```
+
+and when you start one, two further questions — **whose code**, and **whose
+container** — which is what actually separates the named modes:
+
+| | whose code | where it runs | name |
+| --- | --- | --- | --- |
+| the instance's | — | the instance's own | `builtin` |
+| stock, pinned | the *target's* container | self-hosted only | `exec` |
+| stock, pinned | **a container of yours** | anywhere, incl. cloud | **`image` (§4b)** |
+| **your build** | the host | anywhere | `local` |
+
+`exec` and `image` are the same idea — run the published image, never your own
+build — differing only in whose container it lands in. `local` is the only mode
+that runs code this repo compiled.
 
 `PENPOT_MCP_MODE` is the second column only: whether
 `window.penpotMcpServerURI` is injected before page load. Who runs the server is
@@ -86,6 +99,41 @@ lets several tabs in one Chromium each drive their own server.
 | needs a local build | no | no | **yes** |
 | version skew possible | never | never | **yes** |
 
+### 4b. `image`: a stock server of your own, against any target
+
+**Not implemented. Recorded so the map is complete.**
+
+Nothing stops you running `docker run penpotapp/mcp:<tag>` on your own host and
+pointing a worker at **cloud** through it. The plugin still comes from cloud; the
+server is a pinned published image rather than something you built. That is the
+missing cell in the table above, and it would give cloud what `exec` gives
+self-hosted: **many documents on one account, no token, no slot contention** —
+without needing a build, and without needing a shell on the instance.
+
+Whether the pairing works is a version question, and the answer is probably yes:
+
+| | newest published image | what the target's plugin is |
+| --- | --- | --- |
+| `penpotapp/mcp` | **2.17.2** (2026-08-27) | cloud serves **2.18.0** |
+
+That looks like skew, but it is the *harmless* direction. The failure we measured
+is a server that **requires** heartbeats meeting a plugin that sends none. Here
+it is reversed — a 2.17 server that never checks, meeting a 2.18 plugin that
+sends them anyway — and a server that does not look at a message is not broken
+by receiving it. The expected cost is `ApiDocs` drift: the tool descriptions
+would describe 2.17's API while the document is 2.18's.
+
+Skipped because there is little appetite for driving cloud here, and because
+`builtin` already covers the one-document cloud case with no infrastructure at
+all. If that changes, this is a smaller step than it looks: the `ExecBackend`
+interface already abstracts "start a process in a container and tell me its
+pid", and a `docker run` backend is a third implementation beside `compose` and
+`kubectl` rather than a new concept.
+
+The name is provisional — raised as *local-container*, which collides awkwardly
+with `local` (your build) and with `--browser container` (where the browser
+runs). `image` says the distinguishing thing: it runs the published image.
+
 ### Where each one is available
 
 | | self-hosted | penpot cloud |
@@ -93,6 +141,7 @@ lets several tabs in one Chromium each drive their own server.
 | **builtin** | ✅ verified 2026-09-20 | ✅ verified 2026-09-20 |
 | **exec** | ✅ verified, the default | ✗ needs your container |
 | **local** | ✗ broken today (§6) | ✅ verified, prior session |
+| **image** | redundant with `exec` | ○ untested, would work (§4b) |
 
 Note the diagonal: **`exec` is the self-hosted answer and `local` is the cloud
 answer**, for the same reason in mirror image — each gives a lane its own
@@ -101,14 +150,15 @@ contend over.
 
 ## 5. Capability and limitation
 
-| | builtin | exec | local |
-| --- | --- | --- | --- |
-| documents at once | **1 per account** | many | many |
-| a second lane on one account | breaks quietly (§7) | fine | fine |
-| ports to manage | none | a published range | host ports |
-| deployment config needed | **none** | compose/k8s access | a build |
-| survives a Penpot upgrade | yes | yes | only if rebuilt to match |
-| competes with your own tabs | **yes** (§7) | no | no |
+| | builtin | exec | local | image (§4b) |
+| --- | --- | --- | --- | --- |
+| documents at once | **1 per account** | many | many | many |
+| a second lane on one account | breaks quietly (§7) | fine | fine | fine |
+| ports to manage | none | a published range | host ports | host ports |
+| deployment config needed | **none** | compose/k8s access | a build | docker on your host |
+| survives a Penpot upgrade | yes | yes | only if rebuilt | only if retagged |
+| competes with your own tabs | **yes** (§7) | no | no | no |
+| runs code you compiled | no | no | **yes** | no |
 
 **`builtin` is the simplest and the least scalable.** It needs nothing — no
 ports, no container, no build, no `deployment.json` — so it is the mode that
@@ -120,8 +170,10 @@ ceiling comes from.
 no token, and version skew is structurally impossible because the server is the
 same bundle that served the plugin.
 
-**`local` is for hacking on the server itself**, and is the only cloud mode that
-scales past one document.
+**`local` is for hacking on the server itself**, and is today the only
+*implemented* cloud mode that scales past one document. `image` (§4b) would be
+the better answer there — same stock-code guarantee as `exec`, no build — and is
+unbuilt only because cloud is not the target here.
 
 ## 6. Mechanism: version pairing
 
