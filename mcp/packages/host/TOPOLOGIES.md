@@ -1,5 +1,11 @@
 # Topologies: inject vs builtin, cloud vs self-hosted
 
+> **Superseded for the mode comparison** by
+> [`mcp/packages/headless/ARCHITECTURE.md`](../headless/ARCHITECTURE.md), which
+> is kept current. Two claims below have since been disproved — see §5b and the
+> §11 experiment list. This file stays for the investigation trail until
+> `packages/host` is removed.
+
 A study note for future experiments. Everything here was measured on a running
 system; where a number appears, it came from a probe, not from reading code.
 Last measured 2026-09-20 against penpot cloud (2.18.0-RC5) and a self-hosted
@@ -179,7 +185,14 @@ Two traps found while building it:
   world-readable in `ps` for the life of the process, and the worker's env
   carries `PENPOT_PASSWORD`. Use a mode-600 `--env-file` and delete it on exit.
 
-### Cloud needs Google Chrome, which is a separate install
+### Cloud does NOT need Google Chrome — corrected 2026-09-20
+
+**This section was wrong.** Across six runs the bundled Chromium loaded the
+cloud login page, the authenticated dashboard and a workspace with no Cloudflare
+challenge, headless and headed. The `CHANNEL = "chrome"` default for non-loopback
+origins is stale and should be dropped. The original text follows for the record.
+
+#### (superseded) Cloud needs Google Chrome, which is a separate install
 
 For a non-loopback origin `config.js` sets `CHANNEL = "chrome"`, and that means
 *stock Google Chrome*, not the bundled build and not distro chromium:
@@ -308,14 +321,16 @@ answer from a real document, no human tab open:
 
 ## 11. Experiments worth running
 
-1. **Drive cloud in `builtin` mode.** Needs `mcpEnabled` + an `mcp` token on the
-   account, both set through the UI, **and Google Chrome installed** (§5b). If
-   it works, the worker reduces to "a browser and a URL" — no server, no ports,
-   no injection.
-2. **Two workers, one account, cloud.** Does cloud's multi-user server route
-   correctly when two browsers present the same `userToken`, or does the second
-   displace the first? This is the shared-server limitation that pushed the
-   self-hosted setup to `exec`; measure whether it actually bites.
+1. ~~**Drive cloud in `builtin` mode.**~~ **Done, 2026-09-20: it works.** A
+   headless bundled Chromium connected to `wss://design.penpot.app/mcp/ws` and a
+   client returned `{file: "scratch", shapes: 1, version: "2.18.0"}`. The worker
+   does reduce to a browser and a URL. One constraint found doing it: one
+   `userToken` is one plugin slot, it is sticky, and it belongs to an account —
+   so a worker needs its own account. See ARCHITECTURE.md §7.
+2. ~~**Two workers, one account, cloud.**~~ **Answered, 2026-09-20: it bites.**
+   Neither displaces the other. The second connection is accepted, the first
+   registration keeps routing, and the failure reads as a suspended tab.
+   Regenerating the token is the only reliable reset. ARCHITECTURE.md §7.
 3. **Skew on purpose.** Point a `develop` server at a 2.17 plugin and confirm the
    heartbeat failure reproduces, then bisect what the server actually requires.
    The error message is misleading enough to be worth documenting precisely.
