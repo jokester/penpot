@@ -119,21 +119,78 @@ interface ExecBackend {
 }
 ```
 
-`expose` is the method that earns the abstraction, because the two runtimes
-differ in kind rather than in syntax:
+`expose` is the method that earns the abstraction, but **not** because
+Kubernetes needs a tunnel. It earns it because "how does this port become
+reachable" has a different answer per deployment, and the launcher should ask
+rather than assume:
 
 | | **compose** | **kubectl** |
 | --- | --- | --- |
-| reach a port | already published (`4601-4608`) — `expose` is a no-op | **`kubectl port-forward` — a child process per lane** |
 | target | a service name | a pod resolved by label selector, re-resolved each call |
-| port constraint | must sit in the published range (invariant 3) | any free in-pod port; the *local* port is ours to choose |
 | a restart means | the container keeps its name | the pod name changes |
+| port constraint | inside the published range (invariant 3) | any free in-pod port |
+| reachability | already published | **depends on the deployment, not on kubectl** |
 
-So under Kubernetes a lane owns **three** things, not two: the in-pod MCP
-server, the port-forward, and the browser. That fits the generator unchanged —
-one more resource acquired in sequence and released in `finally` — but the
-port-forward is the flakiest of the three and needs its own health signal: if it
-dies, the lane is `failed` even though both real halves are alive and well.
+### Exposure is a deployment property, not a launcher job
+
+Two things need to reach a lane's ports, and they sit in different places:
+
+- **the browser → the WebSocket port.** The browser runs wherever the launcher
+  runs, so this is reachable whenever the launcher shares a network with the
+  pod.
+- **the agent → the HTTP port.** The agent runs on someone's laptop. That is an
+  ingress question, it is already solved with an SSH forward today, and moving
+  to Kubernetes does not change it.
+
+So `kubectl port-forward` is needed in exactly one topology — launcher outside
+the cluster, ports not otherwise exposed — and is the worst of the options
+because it adds a flaky child process per lane. The configured strategy is:
+
+| `exposure` | when | what `expose` does |
+| --- | --- | --- |
+| `none` *(default)* | compose published range; `hostNetwork` pod on the launcher's node; NodePort; launcher running in-cluster | **nothing but verify.** Connect once and fail the lane early if the port is unreachable |
+| `port-forward` | laptop with a remote cluster and no exposure for these ports | spawn `kubectl port-forward` as a lane-owned child, and supervise it |
+
+Default `none`, because the deployments that matter here all satisfy it. This
+host already runs a `k3s agent`, so the likely shape after the migration is the
+launcher on a node beside the pod — the same position it has today relative to
+the container, and the same no-op `expose`.
+
+### Why node-local ports matter more than reachability
+
+A NodePort (or `hostPort`, or `hostNetwork`) does not merely make the port
+reachable. It makes it reachable **as `localhost` on the node**, and that is
+what keeps invariant 7 satisfied.
+
+The rule is not really about the MCP port — it is about the origin the browser
+loads Penpot from. Hardened session cookies are `Secure`, so the browser keeps
+them only for a trustworthy origin: `http://localhost:9001` qualifies,
+`http://10.43.x.y:9001` does not, and the cookie is dropped silently while login
+appears to succeed. So the frontend, not just the MCP server, has to arrive on
+the node's loopback. A tunnel would satisfy that too — the only reason
+`port-forward` was ever a candidate — but a node-local Service satisfies it with
+no moving parts.
+
+One caveat to verify on the real cluster rather than trust from here:
+**NodePort answering on `127.0.0.1` is kube-proxy behaviour, not a guarantee.**
+iptables mode has historically allowed it by setting
+`net.ipv4.conf.all.route_localnet=1`; nftables mode does not, and the behaviour
+has been treated as a wart to remove. `hostPort` and `hostNetwork` bind the node
+directly and are deterministic. On the node:
+
+```sh
+kubectl -n penpot get svc penpot-mcp -o wide
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<nodePort>/mcp
+```
+
+If that answers, `exposure: "none"` is right and nothing else is needed. If it
+does not, prefer `hostPort` over a tunnel.
+
+A third shape is worth noting because it is the tidiest: **the launcher as a
+sidecar in the MCP pod.** The WebSocket is then `localhost` inside the pod,
+which satisfies invariant 7 by construction rather than by careful arrangement,
+and nothing needs exposing for the browser at all. It costs headed mode, which
+wants a display the pod does not have.
 
 Invariant 3 is therefore backend-specific and belongs to the backend, not to
 `core/ports.ts`: the rule is *the agent must be able to reach the lane's MCP
@@ -416,8 +473,10 @@ Each cost real time to learn; each becomes an assertion with a test.
    wrong thing.
 3. In exec mode **the agent must be able to reach the lane's MCP port**, HTTP
    and WebSocket alike, or the server runs perfectly and nothing can reach it.
-   How is the backend's business: compose requires both ports inside the
-   published range; kubectl requires a live port-forward.
+   How is the deployment's business, declared as an `exposure` strategy, not
+   inferred: compose requires both ports inside the published range; a cluster
+   requires either that the launcher shares a network with the pod, or an
+   opt-in port-forward.
 4. Busy-port detection reads **`/proc/net/tcp` *and* `tcp6`** — HTTP binds IPv4,
    the WebSocket binds IPv6.
 5. Ports are probed **inside the container**, never from the host. Docker
@@ -527,14 +586,13 @@ path (`--browser container`, today's image-pinned browser) needs the crashpad
 flags worked out and is worth revisiting only if host Playwright drifts from the
 image often enough to matter.
 
-### 14.4 Port-forward supervision — open
+### 14.4 Port-forward supervision — deferred, and probably moot
 
-Under kubectl a lane's reachability is a child process that can die on its own,
-and `kubectl port-forward` is known to drop on pod restarts and idle timeouts.
-Restarting it transparently keeps the lane alive but hides a real fault;
-failing the lane is honest but noisy. Proposed: restart it a bounded number of
-times, surface the count in the TUI row, and fail the lane once it is exhausted.
-Undecided until there is a cluster to measure against.
+Only `exposure: "port-forward"` has this problem, and that is not the default
+(§5). If it is ever used: `kubectl port-forward` drops on pod restarts and idle
+timeouts, restarting transparently hides a real fault, and failing the lane is
+noisy. Proposed then — bounded restarts, count visible in the TUI row, fail once
+exhausted. Not worth building until a deployment actually needs the strategy.
 
 ### 14.5 `--mode builtin` against cloud — still undriven
 
