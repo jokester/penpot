@@ -107,7 +107,7 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   default** (invariant 11); and that `needsUserToken` is true only for
   `builtin`.
 
-- [ ] **T1.5 `core/config.ts`.** The three layers of SPEC §10. Takes an injected
+- [x] **T1.5 `core/config.ts`.** The three layers of SPEC §10. Takes an injected
   `ConfigIo` port (`read`, `list`) so `core/` keeps its no-`fs` rule while the
   directory-walking and precedence stay testable — see the Decision log. —
   acceptance: tests parse the real `provision-worker` env shape from an
