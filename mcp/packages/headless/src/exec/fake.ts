@@ -20,6 +20,8 @@ interface FakeProcess {
 export interface FakeOptions {
     /** Ports already listening before anything starts, as a previous run would leave. */
     readonly listening?: readonly number[];
+    /** Answers `run`, for the probes that parse a command's output. */
+    readonly runs?: (argv: readonly string[]) => ExecResult | Promise<ExecResult>;
     /** Makes `start` reject with this message instead of starting. */
     readonly failStart?: string;
     /** Makes `expose` reject, as an unreachable port would. */
@@ -51,7 +53,7 @@ export class FakeExecBackend implements ExecBackend {
 
     async run(argv: readonly string[], _signal: AbortSignal): Promise<ExecResult> {
         this.commands.push([...argv]);
-        return { code: 0, stdout: "", stderr: "" };
+        return this.#options.runs === undefined ? { code: 0, stdout: "", stderr: "" } : await this.#options.runs(argv);
     }
 
     async start(

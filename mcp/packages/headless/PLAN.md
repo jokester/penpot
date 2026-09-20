@@ -148,7 +148,7 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   that subscribers see every transition; and that `shutdown` past its deadline
   kills what remains and reports the forced count instead of hanging.
 
-- [ ] **T3.3 `supervisor/leftovers.ts`.** `scan` and `reap`, with `Leftover`
+- [x] **T3.3 `supervisor/leftovers.ts`.** `scan` and `reap`, with `Leftover`
   deliberately not a `LaneRecord`. — acceptance: tests find an in-container
   server through a fake backend and a stray browser by profile directory
   through an injected process lister; assert a leftover's port is excluded from
