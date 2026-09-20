@@ -40,6 +40,27 @@ resolves at runtime.
 
 Formatting comes from the parent: `pnpm -C .. run fmt` uses `mcp/.prettierrc`.
 
+## Using it
+
+`mcp-headless` opens the list. It holds every lane it starts and ends all of
+them when you quit — a lane that outlived its supervisor is exactly the
+leftover the startup scan exists to report.
+
+| key | in the list | in the form |
+| --- | --- | --- |
+| `n` | new lane | — |
+| `enter` | details for the selected lane | open a list, pick from an open one, or start from the `start` row |
+| `escape` | leave details | close an open list, or leave the form |
+| `space` | — | toggle headless and headed |
+| `tab`, `↑`, `↓` | move the selection | move between rows, or within an open list |
+| `←` `→` | — | step a list without opening it |
+| `s` / `r` / `l` | stop · retry or reap · logs | — |
+| `q` | quit, after confirming | — |
+
+The form is prefilled from the account files and from a live list of each
+account's documents, shown as `team / document`. If Penpot cannot be reached
+the ids can still be typed, which is what the old tooling always required.
+
 ## Configuration
 
 Two files, in `$XDG_CONFIG_HOME/mcp-headless` (so `~/.config/mcp-headless` by

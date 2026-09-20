@@ -18,12 +18,20 @@ export interface FormField {
     readonly hint?: string;
 }
 
+/** An open list of choices, under the row it belongs to. */
+export interface FormExpansion {
+    readonly options: readonly string[];
+    readonly index: number;
+}
+
 /** The new-lane form, when one is open. */
 export interface FormState {
     readonly title: string;
     readonly fields: readonly FormField[];
     /** Index of the field the cursor is on. */
     readonly cursor: number;
+    /** The open list, when the focused row has one. */
+    readonly expansion?: FormExpansion;
     /**
      * The non-interactive command this form is equivalent to.
      *
@@ -53,6 +61,8 @@ export interface Screen {
     readonly statusBar?: boolean;
     /** Overrides what the status bar says; otherwise it describes the selection. */
     readonly status?: string;
+    /** A lane to show in full, instead of the list. */
+    readonly details?: LaneRecord;
 }
 
 export interface Size {
@@ -83,6 +93,14 @@ export function render(screen: Screen, size: Size): string {
     const lines: string[] = [];
 
     lines.push(header(screen, cols));
+
+    if (screen.details !== undefined) {
+        lines.push(...detailsOf(screen.details, cols, screen.now ?? 0));
+        lines.push(dim("─".repeat(cols)));
+        lines.push(dim(truncate("  [esc] back   [s] stop   [r] retry   [l] logs   [q] quit", cols)));
+        return lines.join("\n");
+    }
+
     lines.push(dim(columns(names, cols)));
 
     if (screen.records.length === 0) {
@@ -117,7 +135,7 @@ export function render(screen: Screen, size: Size): string {
     }
 
     lines.push(dim("─".repeat(cols)));
-    lines.push(dim(truncate("  [n] new lane   [enter] details   [s] stop   [r] retry   [l] logs   [q] quit", cols)));
+    lines.push(dim(truncate(footer(screen), cols)));
 
     if (screen.message !== undefined && screen.message !== "") {
         lines.push(truncate(`  ${screen.message}`, cols));
@@ -126,6 +144,49 @@ export function render(screen: Screen, size: Size): string {
     if (screen.form !== undefined) lines.push(...form(screen.form, cols));
 
     return lines.join("\n");
+}
+
+/**
+ * The keys, for whatever is on screen.
+ *
+ * Only what is true: the list advertised a details view for a while before one
+ * existed, which is worse than not offering it.
+ */
+function footer(screen: Screen): string {
+    if (screen.form !== undefined) {
+        return "  [enter] choose or start   [space] toggle   [tab] next   [esc] back";
+    }
+    const reap = screen.leftovers.length > 0 ? "[r] reap" : "[r] retry";
+    return `  [n] new lane   [enter] details   [s] stop   ${reap}   [l] logs   [q] quit`;
+}
+
+/** One lane in full, for the things the columns cannot hold. */
+function detailsOf(record: LaneRecord, cols: number, now: number): string[] {
+    const document = record.spec.document;
+    const rows: [string, string][] = [
+        ["state", record.state + (record.detail === undefined ? "" : `  ${record.detail}`)],
+        ["document", document.name ?? "(unnamed)"],
+        ["file id", document.fileId],
+        ["team", document.teamName ?? "(unnamed)"],
+        ["team id", document.teamId],
+        ["account", record.spec.account.name],
+        ["origin", record.spec.account.origin],
+        ["mode", record.spec.mode],
+        ["browser", record.spec.headed ? `headed on ${record.spec.display || "the default display"}` : "headless"],
+        ["ports", record.port === undefined ? "—" : `http ${record.port.http}  ws ${record.port.ws}`],
+        ["client", record.clientUrl ?? "—"],
+        ["uptime", uptime(record, now)],
+    ];
+    if (record.error !== undefined) rows.push(["error", record.error]);
+
+    const out = ["", `  LANE ${record.spec.id}`];
+    for (const [label, value] of rows) out.push(truncate(`  ${cell(label, 10)} ${value}`, cols));
+
+    if (record.log !== undefined && record.log.length > 0) {
+        out.push("", dim("  last output"));
+        for (const line of record.log.slice(-8)) out.push(dim(truncate(`    ${line}`, cols)));
+    }
+    return out;
 }
 
 function header(screen: Screen, cols: number): string {
@@ -217,9 +278,20 @@ function form(state: FormState, cols: number): string[] {
     const lines = ["", `  ${state.title.toUpperCase()}`];
 
     state.fields.forEach((field, index) => {
-        const marker = index === state.cursor ? "▸" : " ";
+        const focused = index === state.cursor;
+        const marker = focused ? "▸" : " ";
         const hint = field.hint === undefined ? "" : ` (${field.hint})`;
         lines.push(truncate(`  ${cell(field.label, 10)}${marker} ${field.value}${hint}`, cols));
+
+        // The open list sits under the row it belongs to, so the thing being
+        // chosen stays next to the choices.
+        if (focused && state.expansion !== undefined) {
+            state.expansion.options.forEach((option, optionIndex) => {
+                const chosen = optionIndex === state.expansion?.index;
+                const line = truncate(`             ${chosen ? "›" : " "} ${option}`, cols);
+                lines.push(chosen ? `${REVERSE}${pad(line, cols)}${RESET}` : line);
+            });
+        }
     });
 
     if (state.error !== undefined) lines.push(truncate(`  ${state.error}`, cols));

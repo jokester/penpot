@@ -15,6 +15,8 @@ import { flavourOf, playwrightLaunch, playwrightSessions } from "./browser/launc
 import { LeasingPool } from "./browser/pool.ts";
 import { ensureSession, sessionStore } from "./browser/session.ts";
 import { backendFor, type ExecBackend } from "./exec/backend.ts";
+import { catalogue } from "./penpot/catalogue.ts";
+import { penpotApi } from "./penpot/rpc.ts";
 import type { LaneDeps, LaneSpec } from "./supervisor/lane.ts";
 import { describe as describeLeftover, scan } from "./supervisor/leftovers.ts";
 import { hostProcesses } from "./supervisor/host-processes.ts";
@@ -94,6 +96,7 @@ async function dispatch(options: Options, settings: Settings, env: NodeJS.Proces
         env,
         // The flag wins over the file, which wins over the default.
         tui: options.columns === undefined ? settings.tui : { ...settings.tui, columns: options.columns },
+        catalogue: catalogue(penpotApi()),
     });
 }
 

@@ -340,3 +340,103 @@ test("no line runs past the terminal with every column at once", () => {
         }
     }
 });
+
+test("the footer offers a details view now that there is one", () => {
+    const out = lines({ records: [record({ spec: spec("1") })], leftovers: [], now: NOW });
+
+    assert.ok(out.some((line) => line.includes("[enter] details")));
+});
+
+test("the footer offers reaping only when there is something to reap", () => {
+    const withWreckage = lines({
+        records: [],
+        leftovers: [{ kind: "server", pid: 348, port: 4601, detail: "node index.js" }],
+        now: NOW,
+    });
+    const without = lines({ records: [record({ spec: spec("1") })], leftovers: [], now: NOW });
+
+    assert.ok(withWreckage.some((line) => line.includes("[r] reap")));
+    assert.ok(without.some((line) => line.includes("[r] retry")));
+});
+
+test("the form's footer names the form's keys, not the list's", () => {
+    const out = lines({
+        records: [],
+        leftovers: [],
+        now: NOW,
+        form: { title: "new lane", fields: [{ label: "account", value: "mcp-worker" }], cursor: 0, command: "x" },
+    });
+
+    assert.ok(out.some((line) => line.includes("[enter] choose or start")));
+    assert.ok(!out.some((line) => line.includes("[n] new lane")), "a list key while typing would be a lie");
+});
+
+test("an open list is drawn under the row it belongs to", () => {
+    const out = lines({
+        records: [],
+        leftovers: [],
+        now: NOW,
+        form: {
+            title: "new lane",
+            fields: [
+                { label: "account", value: "mcp-worker" },
+                { label: "document", value: "Default / worker-scratch" },
+            ],
+            cursor: 1,
+            command: "x",
+            expansion: { options: ["ihate-workspace / diagrams", "Default / worker-scratch"], index: 1 },
+        },
+    });
+
+    const row = out.findIndex((line) => line.includes("▸ Default / worker-scratch"));
+    assert.ok(row >= 0, out.join("\n"));
+    assert.ok(out[row + 1]?.includes("ihate-workspace / diagrams"), "the options follow the row");
+    assert.ok(out[row + 2]?.includes("› Default / worker-scratch"), "the highlight marks the current one");
+});
+
+test("details shows what the columns cannot hold", () => {
+    const rec = record({
+        spec: spec("1", { headed: true, display: ":3", document: { ...doc("diagrams"), teamName: "ihate-workspace" } }),
+        port: { http: 4601, ws: 4602 },
+        clientUrl: "http://127.0.0.1:4601/mcp",
+    });
+    const out = lines({ records: [rec], leftovers: [], now: NOW, details: rec });
+
+    assert.ok(out.some((line) => line.includes("LANE 1")));
+    assert.ok(out.some((line) => line.includes(rec.spec.document.fileId)));
+    assert.ok(out.some((line) => line.includes(rec.spec.document.teamId)));
+    assert.ok(out.some((line) => line.includes("http 4601")));
+    assert.ok(out.some((line) => line.includes("headed on :3")));
+    assert.ok(out.some((line) => line.includes("[esc] back")));
+    assert.ok(!out.some((line) => line.includes("[n] new lane")), "details is not the list");
+});
+
+test("a failed lane's details carry its reason and its last output", () => {
+    const rec = record({
+        spec: spec("1"),
+        state: "failed",
+        error: "the plugin did not dial",
+        log: ["line one", "line two"],
+    });
+    const out = lines({ records: [rec], leftovers: [], now: NOW, details: rec });
+
+    assert.ok(out.some((line) => line.includes("the plugin did not dial")));
+    assert.ok(out.some((line) => line.includes("line two")));
+});
+
+test("no line runs past the terminal in details either", () => {
+    const rec = record({
+        spec: spec("1", { document: { ...doc("a really quite long document name"), teamName: "a long team name" } }),
+        port: { http: 4601, ws: 4602 },
+        clientUrl: "http://127.0.0.1:4601/mcp",
+        log: ["a log line that goes on and on and on and really does not stop for quite some time at all"],
+    });
+
+    for (const cols of [40, 60, 80, 120]) {
+        for (const line of stripAnsi(
+            render({ records: [rec], leftovers: [], now: NOW, details: rec }, { cols, rows: 24 })
+        ).split("\n")) {
+            assert.ok(line.length <= Math.max(40, cols), `at ${cols} cols a line was ${line.length}`);
+        }
+    }
+});

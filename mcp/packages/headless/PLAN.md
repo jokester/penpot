@@ -245,7 +245,7 @@ Raised 2026-09-21 after the first proper look at the interface.
   per account, cached across calls; a failure degrades to typing ids by hand
   rather than to an empty picker.
 
-- [ ] **T7.4 Expandable choices, `start` as a row, `enter` for details.** Three
+- [x] **T7.4 Expandable choices, `start` as a row, `enter` for details.** Three
   separate complaints, one shape. In the form, `enter` currently starts the
   lane, which spends the key that should open a list; starting moves to its own
   row. In the list, `enter` does nothing while the footer advertises details. —
