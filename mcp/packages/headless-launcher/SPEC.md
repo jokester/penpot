@@ -150,42 +150,94 @@ That is dropped. It bought detachment nobody wants, and it cost a second port
 range, a tab-verification step, an "is this browser ours" problem, and the loss
 of Playwright's own context API. Total ownership removes all four.
 
-### A lane is an async generator
+### Lanes share a browser; each owns a tab
+
+A lane does **not** get a Chromium. It gets a **page** in a browser shared with
+every other lane on the same account and mode. Measured on this host:
+
+| | RSS |
+| --- | --- |
+| browser + first tab | 527 MB |
+| each additional tab | **94 MB** |
+| 3 lanes as tabs | ≈ 715 MB |
+| 3 lanes as separate browsers | ≈ 1581 MB |
+
+Two things had to be true for this, and both were measured rather than assumed:
+
+- **Per-page injection works.** `page.addInitScript()` runs before page scripts
+  and is scoped to that page, so three tabs in one context booted with three
+  different `window.penpotMcpServerURI` values. This is the whole trick: the
+  injected URI is what binds a tab to its MCP server (invariant 11), and it
+  turns out to be per-tab, not per-browser.
+- **Background tabs are not throttled** under the existing no-throttle flags:
+  three tabs each ticked 30 times in 3 s, the two backgrounded ones included.
+  That matters because a throttled tab stops sending heartbeats and the server
+  reports it as suspended — the error that cost a day once already.
+
+The pool is keyed by **(account, headed, browser flavour)**, because those are
+the things a browser cannot vary per tab: the profile holds one session, and
+headed and headless are different processes. One worker account driving five
+documents headless is therefore one Chromium with five tabs. A browser is
+created with its first lane and closed with its last.
+
+**This dissolves invariant 8.** "One profile per document" existed only because
+one Chromium per lane meant N processes contending for one profile directory.
+Sharing the instance removes the contention and the workaround together.
+
+The cost is shared fate: if the browser dies, every lane on it fails at once.
+The supervisor watches `context.on("close")` and fails that group together,
+which is at least honest — with one browser per lane the same crash produced a
+single mysteriously dead lane.
+
+### A lane is a plain async function
 
 ```ts
-type LaneEvent =
-  | { state: "opening";   detail: string }
-  | { state: "connected"; port: number; document: DocumentRef }
-  | { state: "failed";    reason: string; log: string[] };
-
-async function* openLane(
+async function runLane(
   spec: LaneSpec,
   deps: LaneDeps,
+  onEvent: (e: LaneEvent) => void,
   signal: AbortSignal,
-): AsyncGenerator<LaneEvent>;
+): Promise<void>;
 ```
 
-The sequence *is* the state machine: the generator yields each transition, and
-the supervisor `for await`s it and mirrors the last event into the record the
-TUI renders. `deps` carries the I/O edges (docker, penpot rpc, browser) so the
-generator is testable with fakes and `core/` stays pure.
+An async generator yielding transitions was the first design and is dropped. It
+looked elegant, but the value it adds is cleanup attached to acquisition — and
+that comes from `try/finally`, not from `yield`:
 
-Three properties, all load-bearing:
+```ts
+const server = await deps.backend.start(argv, env, signal);
+try {
+  const exposure = await deps.backend.expose(server.port, signal);
+  try {
+    const page = await deps.browsers.lease(spec, signal);
+    try {
+      onEvent({ state: "connected", ... });
+      await until(signal);            // park here for the life of the lane
+    } finally { await page.close(); }
+  } finally { await exposure.close(); }
+} finally { await deps.backend.kill(server.pid); }
+```
 
-- **Cleanup lives in `finally`, and only runs if the iterator finishes or is
-  `.return()`d.** Dropping the reference never runs it. The supervisor therefore
-  owns every iterator and always returns it — on abort, on quit, on failure.
-  That single discipline replaces the `trap`, the `exec` and the fall-through
-  this rewrite exists to delete, and it is what makes goal 2 true rather than
-  aspirational.
-- **Generators are pull-based**, so a slow consumer stalls the producer at the
-  `yield`. Once a lane reaches `connected` the generator stops yielding and
-  parks on a promise that settles on abort or failure, while a separate watcher
-  pushes health into the record.
-- **Shutdown is ordered and bounded.** `.return()` on every lane concurrently,
-  each `finally` closing the browser then killing the in-container server, all
-  under one deadline. Past it, the remaining pids are killed outright and the
-  TUI reports what needed forcing rather than hanging on a wedged browser.
+A plain function gets the same guarantee with none of the generator's problems.
+It is not pull-based, so a slow renderer cannot stall a lane. There is no rule
+that the supervisor must remember to call `.return()` or leak every resource.
+And the awkward part of the generator design — that after `connected` it stops
+yielding and parks on a promise — stops being awkward once you admit that a
+thing which emits a few events and then waits is just a function.
+
+Transitions go out through `onEvent`, which the supervisor mirrors into the
+record the TUI renders. `deps` carries the I/O edges (backend, browser pool,
+penpot rpc) so lanes are testable with fakes and `core/` stays pure.
+
+Two properties remain load-bearing:
+
+- **Cancellation is the only way out.** `signal` is passed to every await and
+  to every child; aborting unwinds the stack and every `finally` runs in
+  reverse order of acquisition. That single discipline replaces the `trap`, the
+  `exec` and the fall-through this rewrite exists to delete.
+- **Shutdown is ordered and bounded.** Abort all lanes concurrently under one
+  deadline. Past it, remaining pids are killed outright and the TUI reports what
+  needed forcing rather than hanging on a wedged browser.
 
 ### Lane states
 
@@ -375,8 +427,10 @@ Each cost real time to learn; each becomes an assertion with a test.
    Record the in-container pid; kill it explicitly.
 7. The worker talks to **`localhost`, never a LAN address** — hardened session
    cookies are `Secure` and only loopback is trustworthy.
-8. **One browser profile per document.** Two workers on one profile directory
-   fight over the Chromium lock. *Not enforced today; a real gap.*
+8. **One Chromium per profile directory, never two.** Two instances on one
+   profile fight over the lock. Sharing a browser between lanes (§5) satisfies
+   this by construction, which is why the old "one profile per document" rule is
+   gone rather than enforced.
 9. The REPL is suppressed by aiming **`PENPOT_MCP_REPL_PORT` at a bound port**,
    because the 2.17 bundle has no switch.
 10. **Readiness is the plugin WebSocket opening.** The URL, an RPC probe and
@@ -403,6 +457,7 @@ mcp/packages/headless-launcher/
       topology.ts      builtin | exec | local                  (inv. 9, 11)
       config.ts        the three layers of §10
     browser/
+      pool.ts          browsers keyed by account+mode, leased per lane (§5)
       launch.ts        launchPersistentContext, owned as a child (inv. 7)
       session.ts       cookie, login, profile                  (inv. 8)
       page.ts          open, readiness, reload                 (inv. 10)
@@ -427,6 +482,9 @@ state and holds no logic of its own.
 - **Edges against fixtures**: a captured `/proc/net/tcp` pair (including an
   IPv6-only WebSocket port), a captured `get-teams` / `get-team-recent-files`
   response, and a transcript per backend. No live stack.
+- **Per-tab injection is a regression test**, because the shared browser rests
+  on it: three pages in one context, three different injected URIs, each read
+  back from its own page. It is one assertion and it protects the whole pool.
 - **Both backends run the same suite.** `ExecBackend` gets one contract test —
   start a process, see its port in `listening()`, expose it, kill it, see the
   port released — run against a fake, against compose, and against kubectl when
@@ -483,11 +541,16 @@ Undecided until there is a cluster to measure against.
 If it works, the worker reduces to a browser and a URL and `topology.ts` gets
 simpler. Worth resolving before that module is written rather than after.
 
-### 14.6 One account, many documents — open
+### 14.6 One account, many documents — decided
 
-Invariant 8 wants one profile per document, but the profile holds the session,
-so N documents means N logins of the same account. It works; whether a shared
-cookie jar with per-document profiles is better is unexplored.
+One browser per account, one tab per document, one login. The old worry — that
+N documents meant N profiles and N logins of the same account — was an artifact
+of one Chromium per lane and disappears with it (§5).
+
+Two accounts still mean two browsers, because a persistent profile holds exactly
+one session. If that ever becomes common, `chromium.launch()` with a context per
+account and sessions kept as `storageState` would collapse them into one
+process; not worth it for one worker account.
 
 ### 14.7 The name — open, and not urgent
 
