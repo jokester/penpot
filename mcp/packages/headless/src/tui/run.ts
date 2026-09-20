@@ -11,7 +11,7 @@
 import { emitKeypressEvents } from "node:readline";
 
 import { flavourOf } from "../browser/launch.ts";
-import type { Settings } from "../core/config.ts";
+import type { Settings, TuiSettings } from "../core/config.ts";
 import { isLauncherError } from "../core/errors.ts";
 import type { PortRange } from "../core/ports.ts";
 import { hostProcesses } from "../supervisor/host-processes.ts";
@@ -47,6 +47,8 @@ export interface TuiDeps {
     /** Skips the confirmation before quitting. */
     readonly yes: boolean;
     readonly env: NodeJS.ProcessEnv;
+    /** Which columns the list shows, and whether the status bar is on. */
+    readonly tui: TuiSettings;
 }
 
 /**
@@ -73,6 +75,8 @@ export async function runTui(deps: TuiDeps): Promise<number> {
             leftovers,
             selected: Math.min(selected, Math.max(0, records.length - 1)),
             portRange: deps.portRange,
+            columns: deps.tui.columns,
+            statusBar: deps.tui.statusBar,
             now: Date.now(),
             ...(message === undefined ? {} : { message }),
             ...(form === undefined ? {} : { form: toFormState(form) }),

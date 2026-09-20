@@ -31,6 +31,8 @@ export interface DocumentRef {
     readonly pageId?: string;
     /** For display only. Never part of identity. */
     readonly name?: string;
+    /** The team's name, for display. Never part of identity. */
+    readonly teamName?: string;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

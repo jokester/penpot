@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { load, parseAccount, parseDeployment, parseEnvFile, type ConfigIo } from "./config.ts";
+import { DEFAULT_COLUMNS } from "./columns.ts";
+import { load, parseAccount, parseDeployment, parseEnvFile, parseTui, type ConfigIo } from "./config.ts";
 import { isLauncherError } from "./errors.ts";
 
 const ENV: NodeJS.ProcessEnv = { HOME: "/home/worker" };
@@ -193,4 +194,44 @@ test("an empty configuration directory loads to nothing at all", () => {
 
     assert.equal(settings.deployment, undefined);
     assert.equal(settings.accounts.size, 0);
+});
+
+test("no tui.json means the list looks the way it always has", () => {
+    assert.deepEqual(parseTui(null), { columns: DEFAULT_COLUMNS, statusBar: true });
+    assert.deepEqual(parseTui("  "), { columns: DEFAULT_COLUMNS, statusBar: true });
+});
+
+test("tui.json chooses the columns and the status bar", () => {
+    const tui = parseTui('{ "columns": ["port", "client"], "statusBar": false }');
+
+    assert.deepEqual(tui.columns, ["port", "client"]);
+    assert.equal(tui.statusBar, false);
+});
+
+test("tui.json with only one of the two keeps the other's default", () => {
+    assert.equal(parseTui('{ "columns": ["port"] }').statusBar, true);
+    assert.deepEqual(parseTui('{ "statusBar": false }').columns, DEFAULT_COLUMNS);
+});
+
+test("a tui.json that is there and wrong is an error, unlike one that is absent", () => {
+    // Absent means "no opinion"; present and wrong means someone meant
+    // something and it is not happening.
+    refusesConfig(() => parseTui("not json"));
+    refusesConfig(() => parseTui('{ "columns": ["pid"] }'));
+    refusesConfig(() => parseTui('{ "columns": [] }'));
+    refusesConfig(() => parseTui('{ "statusBar": "yes" }'));
+});
+
+test("load reads tui.json beside the rest", () => {
+    const settings = load(
+        "/etc/headless",
+        ENV,
+        io({
+            "/etc/headless/tui.json": '{ "columns": ["port", "team", "document"] }',
+            "/etc/headless/accounts/mcp-worker.env": ACCOUNT_ENV,
+        })
+    );
+
+    assert.deepEqual(settings.tui.columns, ["port", "team", "document"]);
+    assert.equal(settings.accounts.size, 1);
 });

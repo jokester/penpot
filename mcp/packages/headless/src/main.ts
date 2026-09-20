@@ -92,6 +92,8 @@ async function dispatch(options: Options, settings: Settings, env: NodeJS.Proces
         output: io.out,
         yes: options.yes,
         env,
+        // The flag wins over the file, which wins over the default.
+        tui: options.columns === undefined ? settings.tui : { ...settings.tui, columns: options.columns },
     });
 }
 

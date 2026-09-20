@@ -220,7 +220,7 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
 
 Raised 2026-09-21 after the first proper look at the interface.
 
-- [ ] **T7.1 `core/columns.ts`, a configurable list, and a status bar.** Columns
+- [x] **T7.1 `core/columns.ts`, a configurable list, and a status bar.** Columns
   become data: a catalogue of named columns — port, state, document, team,
   account, browser, display, mode, uptime, client — each with a width and an
   accessor. Which appear, and in what order, comes from `tui.json` beside the

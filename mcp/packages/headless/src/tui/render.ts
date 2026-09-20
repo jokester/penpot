@@ -5,6 +5,7 @@
 // supervisor or in core/, where it can be tested without a terminal. This file
 // turns a Screen into a string, and that is the whole of it.
 
+import { COLUMNS, DEFAULT_COLUMNS, type ColumnName } from "../core/columns.ts";
 import { describeRange } from "../core/ports.ts";
 import type { LaneRecord } from "../supervisor/supervisor.ts";
 import { describe as describeLeftover, type Leftover } from "../supervisor/leftovers.ts";
@@ -46,6 +47,12 @@ export interface Screen {
     readonly now?: number;
     /** The published range, shown in the header when one is configured. */
     readonly portRange?: { readonly lo: number; readonly hi: number };
+    /** Which columns to show, in order. Defaults to the usual six. */
+    readonly columns?: readonly ColumnName[];
+    /** The line under the list carrying what the columns truncate. */
+    readonly statusBar?: boolean;
+    /** Overrides what the status bar says; otherwise it describes the selection. */
+    readonly status?: string;
 }
 
 export interface Size {
@@ -72,16 +79,17 @@ export function stripAnsi(text: string): string {
 /** Renders the whole screen. */
 export function render(screen: Screen, size: Size): string {
     const cols = Math.max(40, size.cols);
+    const names = screen.columns ?? DEFAULT_COLUMNS;
     const lines: string[] = [];
 
     lines.push(header(screen, cols));
-    lines.push(dim(columns(cols)));
+    lines.push(dim(columns(names, cols)));
 
     if (screen.records.length === 0) {
         lines.push(dim(pad("  no lanes. [n] opens one.", cols)));
     } else {
         screen.records.forEach((record, index) => {
-            const line = row(record, cols, screen.now ?? 0);
+            const line = row(record, names, cols, screen.now ?? 0);
             lines.push(index === screen.selected ? `${REVERSE}${line}${RESET}` : line);
 
             // The step, on its own line: a lane can take ninety seconds to
@@ -101,6 +109,11 @@ export function render(screen: Screen, size: Size): string {
             lines.push(truncate(`    ${describeLeftover(leftover)}`, cols));
         }
         lines.push(dim(truncate("    [r] reap   [i] ignore", cols)));
+    }
+
+    if (screen.statusBar !== false) {
+        const status = screen.status ?? statusFor(screen.records[screen.selected ?? 0]);
+        lines.push(dim(truncate(`  ${status}`, cols)));
     }
 
     lines.push(dim("─".repeat(cols)));
@@ -123,40 +136,81 @@ function header(screen: Screen, cols: number): string {
     return truncate(`${left}${" ".repeat(gap)}${right}  `, cols);
 }
 
-/** The column widths, used by the header and the rows so they cannot drift. */
-const COLUMNS = [
-    ["port", 5],
-    ["state", 11],
-    ["document", 23],
-    ["account", 13],
-    ["browser", 9],
-    ["uptime", 7],
-] as const;
-
-/** Lays out one row of cells on the shared column widths. */
-function columnise(values: readonly string[]): string {
-    return `  ${COLUMNS.map(([, width], index) => cell(values[index] ?? "", width)).join(" ")}`;
+/** Lays out one row of cells on the chosen columns' widths. */
+function columnise(names: readonly ColumnName[], value: (name: ColumnName) => string): string {
+    return `  ${names.map((name) => cell(value(name), COLUMNS[name].width)).join(" ")}`;
 }
 
-function columns(cols: number): string {
-    return pad(truncate(columnise(COLUMNS.map(([label]) => label)), cols), cols);
+function columns(names: readonly ColumnName[], cols: number): string {
+    return pad(
+        truncate(
+            columnise(names, (name) => COLUMNS[name].title),
+            cols
+        ),
+        cols
+    );
 }
 
 /** One lane, laid out to the same columns as the header. */
-function row(record: LaneRecord, cols: number, now: number): string {
-    const port = record.port === undefined ? "—" : String(record.port.http);
-    const document = record.spec.document.name ?? short(record.spec.document.fileId);
+function row(record: LaneRecord, names: readonly ColumnName[], cols: number, now: number): string {
+    return pad(
+        truncate(
+            columnise(names, (name) => valueOf(name, record, now)),
+            cols
+        ),
+        cols
+    );
+}
 
-    const line = columnise([
-        port,
-        record.state,
-        document,
-        record.spec.account.name,
-        record.spec.headed ? "headed" : "headless",
-        uptime(record, now),
-    ]);
+/**
+ * One lane's value for one column.
+ *
+ * The reading lives here rather than in `core/columns.ts` because `core/` knows
+ * nothing about a supervisor, and the widths have to be validated without one.
+ */
+export function valueOf(name: ColumnName, record: LaneRecord, now: number): string {
+    const document = record.spec.document;
 
-    return pad(truncate(line, cols), cols);
+    switch (name) {
+        case "port":
+            return record.port === undefined ? "—" : String(record.port.http);
+        case "state":
+            return record.state;
+        case "document":
+            return document.name ?? short(document.fileId);
+        case "team":
+            return document.teamName ?? short(document.teamId);
+        case "account":
+            return record.spec.account.name;
+        case "browser":
+            return record.spec.headed ? "headed" : "headless";
+        case "display":
+            return record.spec.headed ? (record.spec.display ?? "—") : "—";
+        case "mode":
+            return record.spec.mode;
+        case "uptime":
+            return uptime(record, now);
+        case "client":
+            return record.clientUrl ?? "—";
+    }
+}
+
+/**
+ * What the status bar says about the selection.
+ *
+ * The columns show what a person recognises and this shows what they have to
+ * paste somewhere: the ids in full, and the URL an agent connects to. It is the
+ * reason the document column can afford to show a name.
+ */
+export function statusFor(record: LaneRecord | undefined): string {
+    if (record === undefined) return "";
+
+    const document = record.spec.document;
+    const parts = [`file ${document.fileId}`, `team ${document.teamId}`];
+    if (record.clientUrl !== undefined) parts.push(record.clientUrl);
+    if (record.state === "failed" && record.error !== undefined) parts.push(record.error);
+
+    return parts.join("  ·  ");
 }
 
 function form(state: FormState, cols: number): string[] {

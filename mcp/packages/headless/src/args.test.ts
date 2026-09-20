@@ -110,3 +110,10 @@ test("the config directory follows the usual places, and can be overridden", () 
 test("--yes is remembered, because it is what skips the quit prompt", () => {
     assert.equal(parseArgs(["--yes"], ENV).yes, true);
 });
+
+test("--columns overrides the file, and refuses a name that does not exist", () => {
+    assert.deepEqual(parseArgs(["--columns", "port,client"], ENV).columns, ["port", "client"]);
+    assert.equal(parseArgs([], ENV).columns, undefined, "no flag means the file decides");
+    refuses(["--columns", "pid"], "there is no pid column");
+    refuses(["--columns"], "--columns needs a value");
+});

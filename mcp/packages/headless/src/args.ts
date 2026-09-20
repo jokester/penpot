@@ -5,6 +5,7 @@
 // --account starts a new lane, so several can be named in one invocation and
 // the systemd unit is a single command.
 
+import { parseColumns, type ColumnName } from "./core/columns.ts";
 import { fail } from "./core/errors.ts";
 import type { Mode } from "./core/topology.ts";
 
@@ -28,6 +29,8 @@ export interface Options {
     readonly lanes: readonly LaneRequest[];
     /** Skips the confirmation before quitting. */
     readonly yes: boolean;
+    /** Overrides the list's columns for this run. */
+    readonly columns?: readonly ColumnName[];
 }
 
 const MODES: readonly Mode[] = ["builtin", "exec", "local", "image"];
@@ -51,7 +54,9 @@ name more than one; each --account starts a new lane.
   --headed            show the browser. Needs DISPLAY
   --display :N        the X display for --headed
 
-  --config DIR        where deployment.json and accounts/ live
+  --config DIR        where deployment.json, tui.json and accounts/ live
+  --columns a,b,c     which columns the list shows, in order. Overrides
+                      tui.json. See --columns help for the names
   --yes               do not ask before quitting
   --help, --version`;
 
@@ -66,6 +71,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = {}):
     let command: Command = "tui";
     let configDir = env.MCP_HEADLESS_CONFIG ?? defaultConfigDir(env);
     let yes = false;
+    let columns: readonly ColumnName[] | undefined;
 
     const lanes: LaneRequest[] = [];
     /** The lane being filled in. A new --account starts the next one. */
@@ -106,6 +112,10 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = {}):
                 break;
             case "--config":
                 configDir = valueOf(arg, index);
+                index += 1;
+                break;
+            case "--columns":
+                columns = parseColumns(valueOf(arg, index));
                 index += 1;
                 break;
             case "--account":
@@ -152,7 +162,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = {}):
         }
     }
 
-    return { command, configDir, lanes, yes };
+    return { command, configDir, lanes, yes, ...(columns === undefined ? {} : { columns }) };
 }
 
 /** Adds a field to the lane being built, or says which flag came too early. */

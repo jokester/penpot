@@ -49,6 +49,7 @@ same from the environment.
 ```
 ~/.config/mcp-headless/
   deployment.json         which container the MCP servers run in
+  tui.json                optional: what the lane list shows
   accounts/<name>.env     one per worker account, mode 600
 ```
 
@@ -67,6 +68,19 @@ without it `--mode exec` is unavailable and everything else still works.
 
 `projectDir` is resolved against the directory the file is in, so an absolute
 path is the safe spelling when configuration lives outside the repo.
+
+`tui.json` chooses the columns and their order. `--columns port,client` does
+the same for one run and wins over the file. The columns are `port`, `state`,
+`document`, `team`, `account`, `browser`, `display`, `mode`, `uptime` and
+`client`; an unknown name is refused rather than dropped.
+
+```json
+{ "columns": ["port", "state", "team", "document", "client"], "statusBar": true }
+```
+
+The status bar under the list carries what the columns truncate — both ids in
+full and the URL an agent connects to — which is what lets the document and
+team columns show names instead of uuids.
 
 An account file is the shape `provision-worker` writes, unchanged, so the
 existing ones keep working:

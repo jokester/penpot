@@ -5,7 +5,7 @@ import type { AccountRef, DocumentRef } from "../core/target.ts";
 import type { Leftover } from "../supervisor/leftovers.ts";
 import type { LaneSpec } from "../supervisor/lane.ts";
 import type { LaneRecord } from "../supervisor/supervisor.ts";
-import { render, stripAnsi, type Screen } from "./render.ts";
+import { render, statusFor, stripAnsi, valueOf, type Screen } from "./render.ts";
 
 const SIZE = { cols: 80, rows: 24 };
 const NOW = 1_800_000_000_000;
@@ -231,4 +231,112 @@ test("the header names the published range when there is one", () => {
     assert.ok(withRange[0]?.includes("4601-4608"));
     assert.ok(withRange[0]?.includes("mcp-headless"));
     assert.ok(!without[0]?.includes("4601"));
+});
+
+test("the columns shown are the ones asked for, in that order", () => {
+    const rec = record({ spec: spec("1"), port: { http: 4601, ws: 4602 } });
+    const out = lines({ records: [rec], leftovers: [], now: NOW, columns: ["client", "port"] });
+
+    const header = out[1] ?? "";
+    assert.ok(header.indexOf("client") < header.indexOf("port"), header);
+    assert.ok(!header.includes("uptime"), "a column not asked for must not appear");
+});
+
+test("every column can be read off a lane", () => {
+    const rec = record({
+        spec: spec("1", { headed: true, display: ":3", document: { ...doc("diagrams"), teamName: "ihate-workspace" } }),
+        port: { http: 4605, ws: 4606 },
+        clientUrl: "http://127.0.0.1:4605/mcp",
+        since: NOW - 60_000,
+    });
+
+    assert.equal(valueOf("port", rec, NOW), "4605");
+    assert.equal(valueOf("state", rec, NOW), "connected");
+    assert.equal(valueOf("document", rec, NOW), "diagrams");
+    assert.equal(valueOf("team", rec, NOW), "ihate-workspace");
+    assert.equal(valueOf("account", rec, NOW), "mcp-worker");
+    assert.equal(valueOf("browser", rec, NOW), "headed");
+    assert.equal(valueOf("display", rec, NOW), ":3");
+    assert.equal(valueOf("mode", rec, NOW), "exec");
+    assert.equal(valueOf("uptime", rec, NOW), "1m");
+    assert.equal(valueOf("client", rec, NOW), "http://127.0.0.1:4605/mcp");
+});
+
+test("a team with no name falls back to the start of its id", () => {
+    const rec = record({ spec: spec("1") });
+
+    assert.equal(valueOf("team", rec, NOW), "fdbdf01d");
+});
+
+test("a headless lane has no display to show", () => {
+    assert.equal(valueOf("display", record({ spec: spec("1") }), NOW), "—");
+});
+
+test("the status bar carries what the columns cannot", () => {
+    // The reason the document column can afford to show a name.
+    const rec = record({
+        spec: spec("1", { document: doc("diagrams") }),
+        port: { http: 4601, ws: 4602 },
+        clientUrl: "http://127.0.0.1:4601/mcp",
+    });
+    const status = statusFor(rec);
+
+    assert.ok(status.includes(rec.spec.document.fileId), status);
+    assert.ok(status.includes(rec.spec.document.teamId), status);
+    assert.ok(status.includes("http://127.0.0.1:4601/mcp"), status);
+});
+
+test("a failed lane's reason reaches the status bar", () => {
+    const status = statusFor(record({ spec: spec("1"), state: "failed", error: "the plugin did not dial" }));
+
+    assert.ok(status.includes("the plugin did not dial"), status);
+});
+
+test("the status bar describes the selected lane, not the first", () => {
+    const a = record({ spec: spec("1", { document: doc("first") }) });
+    const b = record({
+        spec: spec("2", { document: { ...doc("second"), fileId: "beefcafe-0000-4111-8222-333344445555" } }),
+    });
+    const out = lines({ records: [a, b], leftovers: [], selected: 1, now: NOW });
+
+    assert.ok(out.some((line) => line.includes("beefcafe-0000-4111-8222-333344445555")));
+});
+
+test("the status bar can be turned off", () => {
+    const rec = record({ spec: spec("1") });
+    const on = lines({ records: [rec], leftovers: [], now: NOW });
+    const off = lines({ records: [rec], leftovers: [], now: NOW, statusBar: false });
+
+    assert.ok(on.some((line) => line.includes(rec.spec.document.fileId)));
+    assert.ok(!off.some((line) => line.includes(rec.spec.document.fileId)));
+});
+
+test("a custom status overrides the description of the selection", () => {
+    const out = lines({ records: [], leftovers: [], now: NOW, status: "enter expands · escape closes" });
+
+    assert.ok(out.some((line) => line.includes("enter expands")));
+});
+
+test("no line runs past the terminal with every column at once", () => {
+    const rec = record({
+        spec: spec("1", {
+            headed: true,
+            display: ":3",
+            document: { ...doc("a really quite long document name"), teamName: "a really quite long team name" },
+        }),
+        port: { http: 4601, ws: 4602 },
+        clientUrl: "http://127.0.0.1:4601/mcp",
+    });
+
+    for (const cols of [40, 60, 80, 120, 200]) {
+        const screen: Screen = {
+            records: [rec],
+            leftovers: [],
+            now: NOW,
+            columns: ["port", "state", "document", "team", "account", "browser", "display", "mode", "uptime", "client"],
+        };
+        for (const line of stripAnsi(render(screen, { cols, rows: 24 })).split("\n")) {
+            assert.ok(line.length <= Math.max(40, cols), `at ${cols} cols a line was ${line.length}`);
+        }
+    }
 });

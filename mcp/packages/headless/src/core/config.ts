@@ -6,6 +6,7 @@
 // without a directory of fixtures. `main.ts` binds the port to `node:fs` and
 // is the only place that does.
 
+import { DEFAULT_COLUMNS, parseColumns, type ColumnName } from "./columns.ts";
 import { fail } from "./errors.ts";
 import type { PortRange } from "./ports.ts";
 import { parseWorkspaceUrl, type AccountRef, type DocumentRef } from "./target.ts";
@@ -44,14 +45,23 @@ export interface Account extends AccountRef {
     readonly defaultDocument?: DocumentRef;
 }
 
+/** How the list is laid out. */
+export interface TuiSettings {
+    readonly columns: readonly ColumnName[];
+    /** The line under the list carrying what the columns truncate. */
+    readonly statusBar: boolean;
+}
+
 /** Everything the launcher knows before any flag is read. */
 export interface Settings {
     /** Absent when there is no deployment file: `builtin` still works, `exec` does not. */
     readonly deployment?: Deployment;
     readonly accounts: ReadonlyMap<string, Account>;
+    readonly tui: TuiSettings;
 }
 
 const DEPLOYMENT_FILE = "deployment.json";
+const TUI_FILE = "tui.json";
 const ACCOUNTS_DIR = "accounts";
 
 /**
@@ -76,7 +86,26 @@ export function load(dir: string, env: NodeJS.ProcessEnv, io: ConfigIo): Setting
         accounts.set(name, parseAccount(name, text, env));
     }
 
-    return json === null ? { accounts } : { deployment: parseDeployment(json, dir), accounts };
+    const tui = parseTui(io.read(join(dir, TUI_FILE)));
+    return json === null ? { accounts, tui } : { deployment: parseDeployment(json, dir), accounts, tui };
+}
+
+/**
+ * Reads the list's layout, or supplies the default.
+ *
+ * A missing file is the normal case, so it is not an error; a file that is
+ * there and wrong is, because someone wrote it meaning something.
+ */
+export function parseTui(json: string | null): TuiSettings {
+    if (json === null || json.trim() === "") return { columns: DEFAULT_COLUMNS, statusBar: true };
+
+    const raw = parseJson(json, TUI_FILE);
+    const columns = raw.columns === undefined ? DEFAULT_COLUMNS : parseColumns(raw.columns as readonly unknown[]);
+
+    if (raw.statusBar !== undefined && typeof raw.statusBar !== "boolean") {
+        fail("not-configured", `${TUI_FILE} statusBar must be true or false`, { field: "statusBar" });
+    }
+    return { columns, statusBar: raw.statusBar ?? true };
 }
 
 /**
@@ -86,7 +115,7 @@ export function load(dir: string, env: NodeJS.ProcessEnv, io: ConfigIo): Setting
  * backends are alternatives and only one set of fields applies at a time.
  */
 export function parseDeployment(json: string, configDir: string): Deployment {
-    const raw = parseJson(json);
+    const raw = parseJson(json, DEPLOYMENT_FILE);
     const backend = str(raw, "backend");
 
     const exposure = raw.exposure === undefined ? "none" : str(raw, "exposure");
@@ -224,15 +253,15 @@ function join(dir: string, entry: string): string {
     return dir.endsWith("/") ? `${dir}${entry}` : `${dir}/${entry}`;
 }
 
-function parseJson(json: string): Record<string, unknown> {
+function parseJson(json: string, file: string): Record<string, unknown> {
     let raw: unknown;
     try {
         raw = JSON.parse(json);
     } catch (err) {
-        fail("not-configured", `${DEPLOYMENT_FILE} is not valid JSON: ${(err as Error).message}`, {});
+        fail("not-configured", `${file} is not valid JSON: ${(err as Error).message}`, {});
     }
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-        fail("not-configured", `${DEPLOYMENT_FILE} must hold a JSON object`, {});
+        fail("not-configured", `${file} must hold a JSON object`, {});
     }
     return raw as Record<string, unknown>;
 }

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { DEFAULT_COLUMNS } from "../core/columns.ts";
 import type { Account, Settings } from "../core/config.ts";
 import { applyKey, commandFor, focused, newForm, toFormState, toSpec, whyNot } from "./form.ts";
 
@@ -15,7 +16,7 @@ const account = (name: string, withDocument: boolean): Account => ({
 });
 
 function settings(...accounts: Account[]): Settings {
-    return { accounts: new Map(accounts.map((a) => [a.name, a])) };
+    return { accounts: new Map(accounts.map((a) => [a.name, a])), tui: { columns: DEFAULT_COLUMNS, statusBar: true } };
 }
 
 const ONE = settings(account("mcp-worker", true));
