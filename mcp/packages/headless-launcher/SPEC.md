@@ -54,16 +54,16 @@ Three languages, two directories, one job, no tests. The specific failures:
 
 ## 3. Goals
 
-1. **A TUI that supervises many lanes at once**, each on its own port, in one
-   process, in one terminal.
-2. **Nothing ever `exec`s.** The launcher never replaces itself.
-3. **It opens on what already exists.** Lanes that survived a previous launcher
-   are discovered and adopted, not duplicated (§6).
-4. **Lanes can outlive the launcher** — quitting the TUI is not a kill switch
-   unless you ask for one.
+1. **A long-running supervisor with a TUI**, holding many lanes at once, each on
+   its own port, in one process, in one terminal.
+2. **Total ownership.** Every lane the supervisor creates, it also ends.
+   Quitting stops everything. There is no orphan by design.
+3. **Nothing ever `exec`s.** The supervisor never replaces itself, so you never
+   lose the TUI to the thing it started.
+4. **It starts from a clean slate and says so.** Leftovers from a previous run
+   are found and reaped, not inherited (§6).
 5. **The invariants become tested code**, not comments in a shell script.
-6. **No build step.** A `dist/` would break the read-only container mount and
-   add a stale-artifact failure mode.
+6. **No build step.**
 
 ## 4. Non-goals
 
@@ -77,54 +77,43 @@ Three languages, two directories, one job, no tests. The specific failures:
 
 ## 5. The supervision model
 
-The unit is a lane, not a process. A lane's two halves live in different places
-and have different lifetimes:
+One process owns everything. A lane is a task, not a process:
 
 ```
-  lane :4603
-    ├── MCP server   node index.js, inside the penpot-mcp container
-    │                started with `docker compose exec`, survives the launcher
-    └── worker       Chromium + the workspace tab
-                     started detached, adopted over CDP, survives the launcher
-```
-
-Neither half is a child of the launcher in the ownership sense. The launcher is
-a **supervisor over logical lanes**: each lane is a task with an explicit state
-machine, its own cancellation scope, and a health signal. Several run
-concurrently in one Node process, in the shape of structured concurrency —
-coroutines with a parent that can cancel them, not one OS process each.
-
-```
-        ┌──────────────── launcher process ────────────────┐
-        │  supervisor                                      │
-        │    ├── lane 4601  task  ──▶ CDP ──▶ chromium A    │
-        │    ├── lane 4603  task  ──▶ CDP ──▶ chromium B    │
-        │    └── lane 4605  task  ──▶ CDP ──▶ chromium C    │
-        │  TUI renders supervisor state, sends intents      │
-        └───────────────────────────────────────────────────┘
+        ┌──────────── penpot-headless-mcp-launcher ─────────────┐
+        │  supervisor                                           │
+        │    ├── lane 4601  task ──▶ chromium A (child)          │
+        │    ├── lane 4603  task ──▶ chromium B (child)          │
+        │    └── lane 4605  task ──▶ chromium C (child)          │
+        │  TUI renders supervisor state, sends intents           │
+        └───────────────────────────────────────────────────────┘
                    │ docker compose exec
                    ▼
-        penpot-mcp container: three `node index.js`, ports 4601/4603/4605
+        penpot-mcp container: three `node index.js` on 4601/4603/4605
 ```
 
-### Why the worker survives
+Several lanes run concurrently in one Node process as structured concurrency —
+coroutines under a parent that can cancel them — not one OS process each. That
+is what "not necessarily an OS process" means here: the supervised unit is the
+lane, and only its two halves are real processes.
 
-Chromium is launched detached with `--remote-debugging-port`, and the launcher
-attaches with `chromium.connectOverCDP` rather than owning it as a child. That
-one choice buys goals 3 and 4: the browser is not in the launcher's process
-tree, so quitting the TUI leaves it alone, and a later launcher can reconnect to
-the very same tab. Verified available in the pinned Playwright.
+### Ownership is total, and that is the simplification
 
-The cost is that `launchPersistentContext`'s conveniences are given up for
-explicit CDP wiring, and a crashed launcher leaves browsers that only discovery
-will find — which is exactly what discovery is for.
+Browsers are **children**, started with `launchPersistentContext`. MCP servers
+live in the container but their in-container pid is recorded and killed on the
+way out. Quitting the supervisor ends every lane it opened.
+
+An earlier draft had browsers survive the supervisor and be re-adopted over CDP.
+That is dropped. It bought detachment nobody wants, and it cost a second port
+range, a tab-verification step, an "is this browser ours" problem, and the loss
+of Playwright's own context API. Total ownership removes all four.
 
 ### A lane is an async generator
 
 ```ts
 type LaneEvent =
   | { state: "opening";   detail: string }
-  | { state: "connected"; port: number; cdpPort: number; document: DocumentRef }
+  | { state: "connected"; port: number; document: DocumentRef }
   | { state: "failed";    reason: string; log: string[] };
 
 async function* openLane(
@@ -134,37 +123,36 @@ async function* openLane(
 ): AsyncGenerator<LaneEvent>;
 ```
 
-The sequence *is* the state machine: the generator yields each transition as it
-happens, and the supervisor `for await`s it and mirrors the last event into the
-record the TUI renders. `deps` carries the I/O edges (docker, penpot rpc,
-browser) so the generator is testable with fakes and `core/` stays pure.
+The sequence *is* the state machine: the generator yields each transition, and
+the supervisor `for await`s it and mirrors the last event into the record the
+TUI renders. `deps` carries the I/O edges (docker, penpot rpc, browser) so the
+generator is testable with fakes and `core/` stays pure.
 
-Three properties this shape has to respect, all of them load-bearing:
+Three properties, all load-bearing:
 
-- **Cleanup lives in `finally`, and only runs if the iterator is finished or
-  returned.** Dropping the reference never runs it. The supervisor therefore
-  owns every iterator and always calls `.return()` — on abort, on quit, on
-  failure. That single discipline replaces the `trap`, the `exec`, and the
-  fall-through that this rewrite exists to delete.
+- **Cleanup lives in `finally`, and only runs if the iterator finishes or is
+  `.return()`d.** Dropping the reference never runs it. The supervisor therefore
+  owns every iterator and always returns it — on abort, on quit, on failure.
+  That single discipline replaces the `trap`, the `exec` and the fall-through
+  this rewrite exists to delete, and it is what makes goal 2 true rather than
+  aspirational.
 - **Generators are pull-based**, so a slow consumer stalls the producer at the
-  `yield`. Health must not depend on the TUI pulling. Once the lane reaches
-  `connected` the generator does not keep yielding heartbeats; it parks on a
-  promise that settles on abort or on failure, while a separate watcher pushes
-  health into the record directly.
-- **Adoption enters the same generator at a later state.** `spec` carries an
-  optional existing CDP endpoint; with it, the generator skips launching and
-  yields `connected` after verifying the tab (§6). One code path, one cleanup.
+  `yield`. Once a lane reaches `connected` the generator stops yielding and
+  parks on a promise that settles on abort or failure, while a separate watcher
+  pushes health into the record.
+- **Shutdown is ordered and bounded.** `.return()` on every lane concurrently,
+  each `finally` closing the browser then killing the in-container server, all
+  under one deadline. Past it, the remaining pids are killed outright and the
+  TUI reports what needed forcing rather than hanging on a wedged browser.
 
 ### Lane states
 
 ```
-  discovered ──┐
-               ├──▶ opening ──▶ connected ──▶ closing ──▶ closed
-  requested ───┘        │            │
-                        └──▶ failed ─┘
+  requested ──▶ opening ──▶ connected ──▶ closing ──▶ closed
+                    │            │
+                    └──▶ failed ─┘
 ```
 
-- **discovered** — found at startup, not yet adopted
 - **opening** — server up, browser up, plugin has not dialled yet
 - **connected** — the plugin WebSocket is open. The only trustworthy readiness
   signal (invariant 10)
@@ -173,26 +161,33 @@ Three properties this shape has to respect, all of them load-bearing:
 - **closing / closed** — both halves reaped, port released
 
 Transitions are the only way state changes, each is logged, and the TUI renders
-the machine rather than guessing from side effects.
+the machine rather than inferring it from side effects.
 
-## 6. Discovery and adoption
+## 6. Startup hygiene
 
-On start, before drawing anything, the launcher builds the truth:
+The supervisor does not adopt anything. It does check, before drawing, whether a
+previous run left wreckage — because a `SIGKILL`, a crashed terminal or a
+laptop lid can end a process without running any `finally`.
 
-1. **Servers** — `docker compose exec penpot-mcp` and read `/proc/net/tcp` *and*
-   `/proc/net/tcp6` (invariant 4), then map listening ports to pids and their
-   `PENPOT_MCP_SERVER_PORT`.
-2. **Browsers** — probe `/json/version` on each candidate CDP port; a live
-   endpoint with a Penpot workspace target is a worker.
-3. **Pairing** — a server port with a matching worker is a *connected* lane; a
-   server with no worker, or a worker with no server, is a **half lane** and is
-   shown as such, because that is the orphan state this deployment hit twice.
+1. **In-container servers.** `docker compose exec penpot-mcp`, read
+   `/proc/net/tcp` *and* `/proc/net/tcp6` (invariant 4), and map listening ports
+   in the published range to pids.
+2. **Stray browsers.** Chromium processes holding one of our profile
+   directories.
 
-Adoption is reconnecting, not restarting: `connectOverCDP` to the browser, read
-the document from the open tab. Nothing is disturbed by looking.
+Anything found is reported as a **leftover**, never as a lane, and offered for
+one-key reaping:
 
-`half lanes` get one-key repair: attach a worker to a lone server, or close a
-lone server. That replaces today's `docker compose exec … kill <pid>`.
+```
+  2 leftovers from a previous run
+    :4601  node index.js   in penpot-mcp, pid 348      [r] reap  [i] ignore
+    :4603  chromium        profile-fdbdf01d, pid 91204 [r] reap  [i] ignore
+```
+
+Ignoring is allowed — they might be someone else's — but they are never counted
+as lanes, never supervised, and the ports they hold are excluded from
+allocation. This is hygiene, not inheritance: the supervisor's list contains
+only what it started.
 
 ## 7. The TUI
 
@@ -203,7 +198,7 @@ One screen, two regions.
   port  state       document              account       browser   uptime
   4601  connected   LLM session viewer    mcp-worker    headed    2h14m
   4603  connected   diagrams              mcp-worker    headless  11m
-  4605  half        (server, no worker)   —             —         3m
+  4605  failed      onboarding            mcp-worker    headless  —
   ─────────────────────────────────────────────────────────────────────
   [n] new lane   [enter] details   [s] stop   [r] retry   [l] logs   [q] quit
 
@@ -224,8 +219,11 @@ One screen, two regions.
   display.
 - **It prints the equivalent non-interactive command.** The curses version did
   this and it is how its flags got learned.
-- **Quitting does not stop lanes.** `q` leaves them running and says so; `Q`
-  offers to close them all.
+- **Quitting stops everything, and says so first.** `q` shows what will be
+  closed and asks once; `q` again, or `--yes`, skips the prompt. There is no
+  "leave it running" — the supervisor owns what it started (§3.2), and a lane
+  that outlived its supervisor would be exactly the leftover §6 exists to clean
+  up.
 - ANSI over `node:readline` in raw mode. No curses equivalent needed, and no TUI
   framework is worth a dependency for one list and one form.
 
@@ -252,29 +250,38 @@ are not in tension, and `tsx` is not needed — `mcp/packages/plugin` already
 tests with `node --experimental-strip-types`, so the pattern has a precedent
 here. `tsc --noEmit --strict` type-checks in CI and never produces output.
 
-This became easy for a second reason: under the CDP model no launcher code runs
-inside a container, so nothing has to care whether a container image can run
-TypeScript.
+This became easy for a second reason: v1 launches browsers on the host (§14.3),
+so no launcher code runs inside a container and nothing has to care whether an
+image can run TypeScript.
 
 Dependency budget: **`playwright` at runtime, `typescript` in dev, nothing
 else.** The supervisor is hand-rolled (§14.1).
 
-## 9. Non-interactive surface
+## 9. Running without a TUI
 
-Enough for systemd and scripts; deliberately small.
+The supervisor is the product; the TUI is its face. Both survive without the
+other, but the process is the same long-running thing either way.
 
 ```
-penpot-headless-mcp-launcher                       # the TUI
-penpot-headless-mcp-launcher open  [target…]       # open a lane, print its port, exit
-penpot-headless-mcp-launcher list  [--json]        # discovery output, no TUI
-penpot-headless-mcp-launcher close <port|--all>    # close a lane and reap both halves
+penpot-headless-mcp-launcher                    # supervise, with the TUI
+penpot-headless-mcp-launcher --no-tui [lanes…]  # supervise, logging to stdout
+penpot-headless-mcp-launcher --check            # report leftovers and exit
 ```
 
-`open` takes `--account`, `--file-id`, `--team-id`, `--port`, `--mode`,
-`--headed`, `--display`, `--browser`. It waits for *connected* so the exit code
-means something, with `--no-wait` to opt out.
+`--no-tui` is the systemd shape: open the lanes named on the command line or in
+the config, hold them, log transitions, and shut them all down on `SIGTERM`. It
+is not a different program and not a different code path — the same supervisor
+with a log writer where the renderer would be.
 
-Account provisioning (`provision-worker` today) moves in as
+A lane is named with `--account`, `--file-id`, `--team-id`, and optionally
+`--port`, `--mode`, `--headed`, `--display`. Repeat the group for more lanes.
+
+There is deliberately **no `open` or `close` subcommand**: a one-shot process
+that starts a lane and exits is precisely the detached model that was dropped,
+and it would leave something nobody owns.
+
+Account provisioning (`provision-worker` today) is the one genuinely separate
+job and stays a subcommand:
 `penpot-headless-mcp-launcher account <name> [--invite …] [--reset-password]`.
 
 ## 10. Configuration
@@ -334,15 +341,14 @@ mcp/packages/headless-launcher/
     supervisor/
       lane.ts          the state machine of §5
       supervisor.ts    the set of lanes, cancellation scopes, health
-      discovery.ts     §6: find and adopt what is already running
+      leftovers.ts     §6: find wreckage from a previous run, reap on request
     core/
       target.ts        account + file + team → workspace URL   (inv. 1, 2)
       ports.ts         allocation and validation               (inv. 3, 4, 5)
       topology.ts      builtin | exec | local                  (inv. 9, 11)
       config.ts        the three layers of §10
     browser/
-      launch.ts        detached chromium with a CDP port       (inv. 7)
-      adopt.ts         connectOverCDP, find the workspace tab
+      launch.ts        launchPersistentContext, owned as a child (inv. 7)
       session.ts       cookie, login, profile                  (inv. 8)
       page.ts          open, readiness, reload                 (inv. 10)
     docker/
@@ -363,12 +369,14 @@ state and holds no logic of its own.
   port allocator against a busy list with IPv6-only entries and out-of-range
   requests; the lane state machine against every transition including failure
   and retry.
-- **Edges against fixtures**: a captured `/proc/net/tcp` pair, a captured RPC
-  response, a captured CDP `/json/version`. No live stack.
-- **The survival contract gets its own test**, because it is the whole point:
-  open a lane, kill the launcher, assert the browser and the in-container server
-  are still alive; start a new launcher, assert it *adopts* rather than
-  duplicates; close the lane, assert both halves are gone.
+- **Edges against fixtures**: a captured `/proc/net/tcp` pair (including an
+  IPv6-only WebSocket port), a captured `get-teams` / `get-team-recent-files`
+  response, a captured `docker compose exec` transcript. No live stack.
+- **The ownership contract gets its own test**, because it is the whole point:
+  open two lanes, quit, and assert that both browsers and both in-container
+  servers are gone and both ports are free. Then the ugly half: `SIGKILL` the
+  supervisor, restart it, and assert the leftovers are *reported* (§6) rather
+  than adopted, counted or silently reused.
 - One opt-in end-to-end smoke against the real deployment that calls
   `execute_code`, which is what `smoke.js` does today.
 
@@ -381,61 +389,43 @@ large TypeScript-first dependency for a package whose budget is one runtime
 dependency, and the lane model is small enough to own. Revisit only if lane
 composition outgrows it.
 
-### 14.2 What `q` does to a headed browser — decided
+### 14.2 Ownership and quitting — decided
 
-`q` leaves every lane running, headed included, and prints what survived and how
-to get back. Consistency wins: a rule of "headless survives, headed does not" is
-one more thing to remember at the moment you least want a surprise, and a
-visible window announces itself anyway. `Q` closes everything, and the quit
-summary marks headed lanes so a forgotten window on a VNC desktop is stated
-rather than discovered.
+The supervisor owns every lane it opens and ends all of them on quit, headed and
+headless alike. Detachment, CDP adoption and per-lane debugging ports are all
+dropped with it; what remains of that idea is §6, which reports wreckage from a
+previous run instead of inheriting it.
 
-### 14.3 CDP port allocation — decided
+Measured before dropping it, so the option is costed rather than guessed: a
+host-launched Chromium with `--remote-debugging-port` does adopt cleanly,
+re-adopt after detach, and survive `browser.close()` — the model worked. It was
+dropped because it is not wanted, not because it is impossible. A
+container-launched one additionally needed crash-handler flags that a bare
+`docker run` does not supply.
 
-**Derive from the MCP port with a configurable offset, default 10000**, so lane
-4603 debugs on 14603. One allocator, one range to reason about, and the mapping
-is legible in `ps` output. 14601-14608 sits well below Linux's ephemeral range
-(32768-60999), so it cannot collide with an outbound socket. The derived port is
-still probed before use.
+### 14.3 Container-launched browsers — deferred
 
-**It binds `127.0.0.1` explicitly.** An open CDP endpoint is unauthenticated
-total control of the browser — arbitrary navigation, cookie theft, code
-execution in page context. `--remote-debugging-address=127.0.0.1` is not
-optional, even on a trusted network.
+v1 launches browsers on the host with `launchPersistentContext`. The container
+path (`--browser container`, today's image-pinned browser) needs the crashpad
+flags worked out and is worth revisiting only if host Playwright drifts from the
+image often enough to matter.
 
-### 14.4 Does adoption verify the tab — decided, yes
-
-Cheaply, over plain HTTP before Playwright is involved: `GET /json/list` on the
-CDP port returns every target with its URL. A lane is adopted only when a
-`page` target's URL carries the expected `file-id`. That is one request, needs
-no client library, and rejects the realistic accident — some other Chromium
-happening to hold a port in our range.
-
-Stricter checks exist (`Browser.getBrowserCommandLine` exposes the
-`--user-data-dir`) and are not worth the session setup unless the URL check
-proves insufficient.
-
-### 14.5 Container-launched browsers — open, and currently blocked
-
-Verified working: a **host**-launched Chromium with `--remote-debugging-port`,
-adopted with `connectOverCDP`, re-adopted after detach, with `browser.close()`
-detaching rather than killing. That is the whole model, and it works.
-
-A **container**-launched Chromium does not come up yet: `chrome_crashpad_handler:
---database is required`, because Playwright normally supplies crash-handler
-flags that a bare `docker run` does not. Solvable, but the obvious fix — run
-Playwright inside the container to do the launching — puts a node process back
-in there and with it the question of whether the image can run TypeScript.
-Deferred: v1 launches browsers on the host, where version pinning is the only
-thing lost, and `--browser container` returns once the flag set is worked out.
-
-### 14.6 `--mode builtin` against cloud — still undriven
+### 14.4 `--mode builtin` against cloud — still undriven
 
 If it works, the worker reduces to a browser and a URL and `topology.ts` gets
 simpler. Worth resolving before that module is written rather than after.
 
-### 14.7 One account, many documents — open
+### 14.5 One account, many documents — open
 
 Invariant 8 wants one profile per document, but the profile holds the session,
 so N documents means N logins of the same account. It works; whether a shared
 cookie jar with per-document profiles is better is unexplored.
+
+### 14.6 The name — open, and not urgent
+
+`penpot-headless-mcp-launcher` names the first half of the job. The thing
+launches lanes and then supervises them for as long as it runs, and the second
+half is where the design effort went. Keeping it is defensible — it is what you
+type, and the first thing it does is launch — but `-supervisor`, or dropping the
+verb entirely for `penpot-headless-mcp`, both describe it better. Cheap to
+change before there is code; annoying after.
