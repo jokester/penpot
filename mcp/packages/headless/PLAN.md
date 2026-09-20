@@ -91,7 +91,7 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   value, a missing `team-id`, a non-UUID id, and a URL with no hash query. Each
   failure names the offending field.
 
-- [ ] **T1.3 `core/ports.ts`.** `allocate(range, busy)` and
+- [x] **T1.3 `core/ports.ts`.** `allocate(range, busy)` and
   `assertUsable(pair, range, busy)`. Pure — `busy` arrives as an argument
   because only the container can answer it (invariant 5). — acceptance: tests
   cover a pair skipped because only its WebSocket half is busy (the IPv6 case,
