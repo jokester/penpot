@@ -216,6 +216,44 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   the state being left. — acceptance: `rg` finds no live reference to any
   deleted path outside journals and the design docs' history sections.
 
+## Milestone 7 — The TUI as asked for
+
+Raised 2026-09-21 after the first proper look at the interface.
+
+- [ ] **T7.1 `core/columns.ts`, a configurable list, and a status bar.** Columns
+  become data: a catalogue of named columns — port, state, document, team,
+  account, browser, display, mode, uptime, client — each with a width and an
+  accessor. Which appear, and in what order, comes from `tui.json` beside the
+  other configuration, or from `--columns`. The status bar under the list
+  carries what the columns truncate. — acceptance: an unknown column is refused
+  naming the ones that exist; the default set renders as it does today; a custom
+  order renders in that order; the status bar shows the selected lane's
+  `file-id`, `team-id` and client URL; no line runs past the terminal at any of
+  five widths.
+
+- [ ] **T7.2 Carry `--display` through to the browser.** It is parsed,
+  validated and then dropped: `display` appears nowhere outside `args.ts`, so a
+  headed lane can only ever use the ambient `DISPLAY`. — acceptance: the display
+  reaches `launchPersistentContext`'s environment; it is part of the browser key,
+  so two lanes on different displays do not share a process; `--headed` with no
+  display is still refused at parse.
+
+- [ ] **T7.3 `penpot/catalogue.ts` — teams and documents by name.** A uuid is
+  not something anyone recognises. The RPC to list them already exists and is
+  tested; nothing calls it yet. — acceptance: against a fake `PenpotApi`,
+  documents come back as team name plus file name carrying both ids; one login
+  per account, cached across calls; a failure degrades to typing ids by hand
+  rather than to an empty picker.
+
+- [ ] **T7.4 Expandable choices, `start` as a row, `enter` for details.** Three
+  separate complaints, one shape. In the form, `enter` currently starts the
+  lane, which spends the key that should open a list; starting moves to its own
+  row. In the list, `enter` does nothing while the footer advertises details. —
+  acceptance: `enter` on a choice expands it and `up`/`down` move within the
+  expansion; `enter` picks and collapses, `escape` collapses without picking; a
+  lane starts only from the `start` row; `enter` on a lane opens a details view;
+  the footer says only what is true.
+
 ## Open questions
 
 - **Two lanes, one plugin connection.** *(blocks T6.3.)* With two lanes in one
