@@ -170,7 +170,7 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   check and both login paths are driven against a fake context; the interactive
   path waits for the cookie to exist rather than for the window to close.
 
-- [ ] **T4.3 `penpot/rpc.ts`.** Login, teams, recent files, read the MCP token —
+- [x] **T4.3 `penpot/rpc.ts`.** Login, teams, recent files, read the MCP token —
   with an injected `fetch` and the cookie passed explicitly, because Node will
   not send a `Secure` cookie over loopback http. — acceptance: tests drive
   captured `get-teams` and `get-team-recent-files` responses; a 401 surfaces as
