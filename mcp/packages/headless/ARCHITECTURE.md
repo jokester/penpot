@@ -136,12 +136,18 @@ runs). `image` says the distinguishing thing: it runs the published image.
 
 ### Where each one is available
 
-| | self-hosted | penpot cloud |
-| --- | --- | --- |
-| **builtin** | ✅ verified 2026-09-20 | ✅ verified 2026-09-20 |
-| **exec** | ✅ verified, the default | ✗ needs your container |
-| **local** | ✗ broken today (§6) | ✅ verified, prior session |
-| **image** | redundant with `exec` | ○ untested, would work (§4b) |
+| | self-hosted | penpot cloud | in the launcher |
+| --- | --- | --- | --- |
+| **builtin** | ✅ verified 2026-09-20 | ✅ verified 2026-09-20 | deferred — contends with your tabs |
+| **exec** | ✅ verified | ✗ needs your container | **implemented (v1, the only one)** |
+| **local** | ✗ broken today (§6) | ✅ verified, prior session | deferred |
+| **image** | redundant with `exec` | ○ untested, would work (§4b) | deferred |
+
+The mechanism works in every cell marked verified; the last column is a scoping
+choice, not a capability claim. See [SPEC.md](SPEC.md) §3b for why `exec` is the
+only one v1 builds: the goal is decoupling a worker from the operator's own
+tabs, and `builtin` is the one mode that cannot do that, because it routes by an
+account's token and a token has one plugin slot.
 
 Note the diagonal: **`exec` is the self-hosted answer and `local` is the cloud
 answer**, for the same reason in mirror image — each gives a lane its own

@@ -65,6 +65,33 @@ Three languages, two directories, one job, no tests. The specific failures:
 5. **The invariants become tested code**, not comments in a shell script.
 6. **No build step.**
 
+## 3b. Scope: v1 implements `exec` against self-hosted, and only that
+
+The driving goal is **decoupling the worker from the operator's own interactive
+tabs**. That single requirement decides the mode:
+
+| mode | decoupled from your tabs? | why |
+| --- | --- | --- |
+| `builtin` | **no** | routes by the account's `userToken`; one token is one plugin slot, so a worker and a human tab contend for it |
+| `exec` | yes | its own single-user server per lane; the token is never used |
+| `local` | yes | same, but needs a build, and is broken against 2.17 today |
+| `image` | yes | same, but needs a container of your own — redundant where you already control the containers |
+
+So `exec` is not a default among equals; it is the only mode that meets the goal
+without a build or an extra container. v1 implements it and nothing else.
+
+**The other modes stay in the map and in the types.** `Mode` remains the full
+union and `core/topology.ts` wires all four, because that part is pure, cheap,
+and is the map made executable. What v1 omits is the *lane* implementation for
+the other three, which fails with a reason naming this section rather than a
+`TODO`. Two of them are small when wanted: `builtin` is a one-half lane needing
+no backend at all, and `image` is a third `ExecBackend` beside `compose` and
+`kubectl`.
+
+Deferring them is not a bet that they are unimportant. `ARCHITECTURE.md` §4
+exists precisely so the next person can see what was left on the table and why,
+rather than rediscovering the axis.
+
 ## 4. Non-goals
 
 - **Not a container manager.** The `penpot-mcp` container is someone else's;
