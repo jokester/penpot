@@ -9,7 +9,9 @@ import { join } from "node:path";
 
 import { chromium, type BrowserContext, type Page } from "playwright";
 
+import type { AccountRef } from "../core/target.ts";
 import type { BrowserKey, BrowserSession, Launch, Lease, LeaseInit } from "./pool.ts";
+import type { OpenSessionContext, SessionContext } from "./session.ts";
 import { watchPluginSocket } from "./page.ts";
 
 /**
@@ -139,4 +141,45 @@ function clearHttpCache(profileDir: string): void {
     for (const dir of ["Cache", "Code Cache", "GPUCache", "Service Worker/CacheStorage"]) {
         rmSync(join(profileDir, "Default", dir), { recursive: true, force: true });
     }
+}
+
+/**
+ * Opens a context for logging in, on the account's own profile.
+ *
+ * Separate from `playwrightLaunch` because a login is not a lane: it wants no
+ * injection, no workspace URL and no plugin watch, and it must close the
+ * context afterwards so Chromium flushes the cookie jar to disk.
+ */
+export function playwrightSessions(options: LaunchOptions = {}): OpenSessionContext {
+    return async (account: AccountRef, headless: boolean): Promise<SessionContext> => {
+        const context = await chromium.launchPersistentContext(account.profileDir, {
+            headless,
+            ...(options.channel === undefined || options.channel === "" ? {} : { channel: options.channel }),
+            args: [...NO_THROTTLE_ARGS, ...(options.args ?? [])],
+            viewport: { width: 1440, height: 900 },
+        });
+
+        return {
+            async cookies(origin: string) {
+                return await context.cookies(origin);
+            },
+            async post(url: string, body: unknown) {
+                const response = await context.request.post(url, {
+                    headers: { "Content-Type": "application/json", Accept: "application/json" },
+                    data: body as Record<string, unknown>,
+                });
+                return { ok: response.ok(), status: response.status(), text: () => response.text() };
+            },
+            async open(url: string) {
+                const page = context.pages()[0] ?? (await context.newPage());
+                await page.goto(url, { waitUntil: "domcontentloaded", timeout: GOTO_TIMEOUT_MS });
+            },
+            hasWindow() {
+                return context.pages().length > 0;
+            },
+            async close() {
+                await context.close().catch(() => undefined);
+            },
+        };
+    };
 }

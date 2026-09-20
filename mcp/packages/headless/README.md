@@ -21,9 +21,17 @@ Status: **being built.** See [PLAN.md](PLAN.md) for what exists and what is next
 ## Running the checks
 
 ```sh
-pnpm install          # once, in this directory
-pnpm run test         # node:test over src/**/*.test.ts
-pnpm run types:check  # tsc --noEmit
+pnpm install                       # once, in this directory
+pnpm exec playwright install chromium   # once per machine; see below
+pnpm run test                      # node:test over src/**/*.test.ts
+pnpm run types:check               # tsc --noEmit
+```
+
+Tests that need a real browser or the live stack are gated behind
+`MCP_HEADLESS_E2E=1` and skip by default:
+
+```sh
+MCP_HEADLESS_E2E=1 pnpm run test
 ```
 
 TypeScript runs directly: Node strips types from 23.6 on, so there is no build
@@ -36,5 +44,8 @@ Formatting comes from the parent: `pnpm -C .. run fmt` uses `mcp/.prettierrc`.
 
 This package keeps its own `pnpm-lock.yaml` and is **not** a member of
 `mcp/pnpm-workspace.yaml`, so Playwright stays out of the MCP server's lockfile.
-Playwright is pinned to the exact version the repo root pins, because the
-browser build is pinned on purpose.
+Playwright is pinned to the exact version the repo root and `frontend` pin,
+because the browser build is pinned on purpose. The install script is blocked
+in `pnpm-workspace.yaml`, so the browser download is a separate one-time step
+per machine -- that keeps a fresh checkout's install under a second, and the
+browsers are shared by every checkout through `~/.cache/ms-playwright`.

@@ -164,7 +164,7 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   leaking a browser. The three-tabs-three-injected-URIs regression runs for
   real behind `MCP_HEADLESS_E2E=1`.
 
-- [ ] **T4.2 `browser/session.ts`.** The session store: does this profile hold
+- [x] **T4.2 `browser/session.ts`.** The session store: does this profile hold
   a session, log in by password, log in interactively. (`browser/page.ts` moved
   into T4.1 — the pool cannot open a tab without it.) — acceptance: the cookie
   check and both login paths are driven against a fake context; the interactive
@@ -247,6 +247,16 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   prose, API.md and IMPL-HANDOFF all say `exec/`. Fixed in T1.1.
 - 2026-09-20: **The plan lives here, not in `docs/`.** `docs/` is Penpot's
   Eleventy documentation site.
+- 2026-09-20: **Playwright stays pinned at `1.62.1`, and the browser is a
+  one-time download.** The pin matches the root workspace *and* `frontend`;
+  only `mcp/packages/host`'s caret floated to 1.63.0, which is why the browser
+  on this host was revision 1243 and the pinned build had to be fetched. Run
+  `pnpm exec playwright install chromium` once per machine — `allowBuilds`
+  blocks the automatic download so a worktree install stays under a second.
+- 2026-09-20: **`loginWithPassword` takes the whole `Account`.** API.md passed
+  a loose password beside an `AccountRef`, which allows pairing a password with
+  the wrong email and makes every caller handle a secret. The account file
+  already carries both.
 - 2026-09-20: **`browser/page.ts` moved from T4.2 into T4.1.** The pool cannot
   open a tab without the readiness watch, so splitting them would have meant
   merging a pool that could not be used. `browser/session.ts` is T4.2 on its
