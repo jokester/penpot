@@ -38,7 +38,7 @@ export class FakeExecBackend implements ExecBackend {
 
     #nextPid = 100;
     readonly #processes = new Map<number, FakeProcess>();
-    readonly #preListening: Set<number>;
+    #preListening: Set<number>;
     #options: FakeOptions;
 
     constructor(options: FakeOptions = {}) {
@@ -49,6 +49,7 @@ export class FakeExecBackend implements ExecBackend {
     /** Changes what goes wrong from here on, for a retry test. */
     set(options: FakeOptions): void {
         this.#options = { ...this.#options, ...options };
+        if (options.listening !== undefined) this.#preListening = new Set(options.listening);
     }
 
     async run(argv: readonly string[], _signal: AbortSignal): Promise<ExecResult> {

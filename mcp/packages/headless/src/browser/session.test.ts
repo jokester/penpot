@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import type { Account } from "../core/config.ts";
 import { isLauncherError } from "../core/errors.ts";
 import {
+    ensureSession,
     isSessionOnly,
     sessionStore,
     type OpenSessionContext,
@@ -176,4 +177,39 @@ test("a trailing slash on the origin does not double up", async () => {
 test("a session-only cookie is recognisable, because it will not survive a restart", () => {
     assert.equal(isSessionOnly({ name: "auth-token", value: "a", expires: -1 }), true);
     assert.equal(isSessionOnly(COOKIE), false);
+});
+
+test("a profile that already has a session is left alone", async () => {
+    const f = fakeContexts({ cookies: [COOKIE] });
+    await ensureSession(ACCOUNT, f.store, AbortSignal.timeout(5000));
+
+    assert.deepEqual(f.state.posts, [], "it should not have logged in again");
+});
+
+test("a profile with no session is logged in before any lane opens", async () => {
+    // Without this the workspace URL redirects to the login page, the page
+    // loads, nothing errors, and the lane waits ninety seconds before blaming
+    // the plugin. Measured on the first live run.
+    // The first look finds nothing; the one after the login finds the cookie.
+    const f = fakeContexts({ appearsAfter: 1 });
+    await ensureSession(ACCOUNT, f.store, AbortSignal.timeout(5000));
+
+    assert.equal(f.state.posts.length, 1);
+    // One context to look, one to log in -- and neither opens a window.
+    assert.deepEqual(f.state.opened, [{ headless: true }, { headless: true }]);
+    assert.equal(f.state.closed, 2, "both contexts must close so the jar is flushed");
+});
+
+test("no session and no password says what to do about it", async () => {
+    const f = fakeContexts({ cookies: [] });
+    const { password: _password, ...noPassword } = ACCOUNT;
+
+    await assert.rejects(
+        () => ensureSession(noPassword, f.store, AbortSignal.timeout(5000)),
+        (err: unknown) => {
+            assert.ok(isLauncherError(err));
+            assert.ok(err.message.includes("log in once with a window"), err.message);
+            return true;
+        }
+    );
 });

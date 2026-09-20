@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import type { BrowserKey, BrowserPool, Lease, LeaseInit } from "../browser/pool.ts";
 import { isLauncherError } from "../core/errors.ts";
 import type { AccountRef, DocumentRef } from "../core/target.ts";
+import { FakeExecBackend } from "../exec/fake.ts";
 import type { LaneDeps, LaneEvent, LaneSpec } from "./lane.ts";
 import { LaneSupervisor, type LaneRecord } from "./supervisor.ts";
 
@@ -71,10 +72,10 @@ class ScriptedLanes {
     }
 }
 
-function build() {
+function build(backend?: FakeExecBackend) {
     const pool = new CountingPool();
     const lanes = new ScriptedLanes();
-    const deps: LaneDeps = { pool, portRange: { lo: 4601, hi: 4608 } };
+    const deps: LaneDeps = { pool, portRange: { lo: 4601, hi: 4608 }, ...(backend === undefined ? {} : { backend }) };
     const sup = new LaneSupervisor(deps, { run: lanes.run });
     return { pool, lanes, sup };
 }
@@ -269,4 +270,66 @@ test("shutdown with nothing running is immediate and honest", async () => {
 
     assert.deepEqual(await sup.shutdown(1000), { forced: 0 });
     assert.equal(pool.closed, 1);
+});
+
+test("concurrent opens never hand out the same port", async () => {
+    // The bug this replaces, measured on the first two-lane run: each open
+    // probed the container before the other had started its server, and both
+    // lanes took 4601. A lane cannot see its siblings; the supervisor can.
+    const { sup, lanes } = build(new FakeExecBackend());
+
+    await Promise.all([sup.open(spec(1)), sup.open(spec(2)), sup.open(spec(3))]);
+
+    const ports = lanes.started.map((s) => s.port?.http);
+    assert.deepEqual(ports, [4601, 4603, 4605], `got ${ports.join(",")}`);
+    assert.equal(new Set(ports).size, 3);
+});
+
+test("a port a previous run left listening is skipped", async () => {
+    const { sup, lanes } = build(new FakeExecBackend({ listening: [4601, 4602] }));
+    await sup.open(spec(1));
+
+    assert.deepEqual(lanes.started[0]?.port, { http: 4603, ws: 4604 });
+});
+
+test("an operator's port is checked against siblings, not just the container", async () => {
+    const { sup } = build(new FakeExecBackend());
+    await sup.open(spec(1, { port: { http: 4603, ws: 4604 } }));
+
+    // Nothing is listening on 4603 yet -- the lane has not started -- so only
+    // the reservation can refuse this.
+    await assert.rejects(
+        () => sup.open(spec(2, { port: { http: 4603, ws: 4604 } })),
+        (err: unknown) => isLauncherError(err) && err.code === "port-busy"
+    );
+});
+
+test("closing a lane gives its port back", async () => {
+    const { sup, lanes } = build(new FakeExecBackend());
+    const first = await sup.open(spec(1));
+    await sup.close(first);
+    await sup.open(spec(2));
+
+    assert.deepEqual(lanes.started[1]?.port, { http: 4601, ws: 4602 });
+});
+
+test("retrying a failed lane chooses a port again", async () => {
+    // The range has moved on since it failed, and its old pair may be
+    // someone else's now.
+    const backend = new FakeExecBackend();
+    const { sup, lanes } = build(backend);
+    const id = await sup.open(spec(1));
+    lanes.failLane(id);
+
+    backend.set({ listening: [4601, 4602] });
+    await sup.retry(id);
+
+    assert.deepEqual(lanes.started[1]?.port, { http: 4603, ws: 4604 });
+});
+
+test("a builtin lane needs no port at all", async () => {
+    const { sup, lanes } = build(new FakeExecBackend());
+    await sup.open(spec(1, { mode: "builtin" }));
+
+    assert.equal(lanes.started[0]?.port, undefined);
 });

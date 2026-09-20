@@ -7,7 +7,7 @@
 // writer where the renderer would be.
 
 import { fail } from "../core/errors.ts";
-import type { PortPair } from "../core/ports.ts";
+import { allocate, assertUsable, type PortPair } from "../core/ports.ts";
 import { runLane, type LaneDeps, type LaneEvent, type LaneSpec, type LaneState } from "./lane.ts";
 
 /** What the TUI draws for one lane. */
@@ -57,6 +57,10 @@ export class LaneSupervisor implements Supervisor {
     readonly #now: () => number;
     readonly #lanes = new Map<string, Live>();
     readonly #subscribers = new Set<(records: readonly LaneRecord[]) => void>();
+    /** Ports handed out but not yet listening, so a sibling cannot take them. */
+    readonly #reserved = new Map<string, PortPair>();
+    /** Serialises open(), because choosing a port is a read then a write. */
+    #gate: Promise<unknown> = Promise.resolve();
     #nextId = 1;
 
     constructor(deps: LaneDeps, options: SupervisorOptions = {}) {
@@ -75,11 +79,46 @@ export class LaneSupervisor implements Supervisor {
      * writing.
      */
     async open(spec: Omit<LaneSpec, "id">): Promise<string> {
+        // Serialised, because choosing a port is a read of what is busy
+        // followed by a write that makes it busy. Two concurrent opens each
+        // probed the container before the other had started its server and
+        // both took 4601 -- measured on the first two-lane run. A lane cannot
+        // see its siblings; only this can.
+        const run = this.#gate.then(() => this.#openOne(spec));
+        this.#gate = run.catch(() => undefined);
+        return await run;
+    }
+
+    async #openOne(spec: Omit<LaneSpec, "id">): Promise<string> {
         this.#refuseClashes(spec);
 
         const id = String(this.#nextId++);
-        this.#start({ ...spec, id });
+        const port = await this.#choosePort(spec);
+        if (port !== null) this.#reserved.set(id, port);
+
+        this.#start({ ...spec, id, ...(port === null ? {} : { port }) });
         return id;
+    }
+
+    /**
+     * Settles this lane's ports before it starts, or null when it needs none.
+     *
+     * The busy list is what the container reports plus what this supervisor has
+     * already promised. The container alone is not enough: a port handed to a
+     * lane that has not finished starting is still free as far as /proc is
+     * concerned.
+     */
+    async #choosePort(spec: Omit<LaneSpec, "id">): Promise<PortPair | null> {
+        const backend = this.#deps.backend;
+        if (spec.mode === "builtin" || backend === undefined) return null;
+
+        const reserved = [...this.#reserved.values()].flatMap((pair) => [pair.http, pair.ws]);
+        const busy = [...new Set([...(await backend.listening()), ...reserved])];
+
+        if (spec.port === undefined) return allocate(this.#deps.portRange, busy);
+
+        assertUsable(spec.port, this.#deps.portRange, busy);
+        return spec.port;
     }
 
     async close(id: string): Promise<void> {
@@ -92,6 +131,7 @@ export class LaneSupervisor implements Supervisor {
 
         this.#set(id, { state: "closed" });
         this.#lanes.delete(id);
+        this.#reserved.delete(id);
         this.#publish();
     }
 
@@ -106,9 +146,15 @@ export class LaneSupervisor implements Supervisor {
             });
         }
 
-        const spec = lane.record.spec;
+        // Re-choose the port: the range has moved on since the lane failed,
+        // and the pair it had may now be someone else's.
+        const { port: _stale, ...spec } = lane.record.spec;
         this.#lanes.delete(id);
-        this.#start(spec);
+        this.#reserved.delete(id);
+
+        const port = await this.#choosePort(spec);
+        if (port !== null) this.#reserved.set(id, port);
+        this.#start({ ...spec, id, ...(port === null ? {} : { port }) });
     }
 
     list(): readonly LaneRecord[] {
@@ -141,6 +187,7 @@ export class LaneSupervisor implements Supervisor {
 
         const forced = outstanding.size;
         this.#lanes.clear();
+        this.#reserved.clear();
         this.#publish();
         await this.#deps.pool.closeAll();
         return { forced };

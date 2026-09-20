@@ -199,11 +199,16 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   against a fake `PenpotApi`; the env file is written mode 600; a run without
   the flag never calls `create-access-token`.
 
-- [ ] **T6.2 Live acceptance run.** *(human-verified, from the main checkout —
-  not a worktree task.)* IMPL-HANDOFF §8: open two lanes on two documents, quit,
-  confirm both browsers and both in-container servers are gone and both ports
-  free. Then `SIGKILL` the supervisor, restart it, confirm the leftovers are
-  **reported rather than adopted**, reap them, confirm the container is clean.
+- [~] **T6.2 Live acceptance run.** *(human-verified, from the main checkout —
+  not a worktree task.)* Run 2026-09-20 against the real stack and the
+  `mcp-worker` account's own documents. **Passed:** a lane opens, logs in,
+  starts its server, opens the tab, the plugin dials, and an agent's
+  `execute_code` returns real data from the document; `SIGTERM` leaves the
+  container at baseline with no browser; `SIGKILL` leaves wreckage that
+  `--check` reports as **leftovers rather than lanes** and that `reap` clears;
+  two lanes take distinct ports and share one browser, and both are torn down
+  cleanly. **Failed:** with two lanes, only the first has a live plugin
+  connection — see Open questions.
 
 - [ ] **T6.3 Delete the old tooling.** `run-mcp-worker`, `run-mcp-worker.py`,
   `provision-worker`, `mcp/packages/host/`, and the `deploy/home-cluster/HANDOFF.md`
@@ -212,6 +217,31 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   deleted path outside journals and the design docs' history sections.
 
 ## Open questions
+
+- **Two lanes, one plugin connection.** *(blocks T6.3.)* With two lanes in one
+  browser, only the first ends up with an established WebSocket. Measured
+  2026-09-20: lanes on 4601 and 4603 both reported connected, the container
+  showed exactly one established socket on 4602, and the server on 4603
+  answered a tool call with "No Penpot plugin instances are currently
+  connected". One browser was shared, as designed, and both tabs did open a
+  socket — the second one closed again. Two things follow, and the first is
+  worth doing whatever the cause turns out to be:
+  1. **Readiness is too eager.** A socket that opens and immediately closes
+     satisfies `waitForPlugin`, so a lane reports connected when it is not.
+     `PluginWatch` already tracks `dropped` and nothing reads it. The lane
+     should settle briefly and re-check, which turns a false "connected" into
+     an honest failure with a reason.
+  2. **Root cause unknown.** Whether a Penpot profile can host two MCP plugin
+     instances at once is not established. Two separate browsers cannot be
+     tested with one account — one profile directory holds one Chromium — so
+     answering it needs either a second worker account or a per-lane browser
+     flavour.
+- **Nothing non-interactive reaps.** `--check` reports leftovers and the TUI's
+  `r` clears them, but a script has no way to. A `--reap` flag is the obvious
+  addition.
+- **`recentFiles` returns an empty `modifiedAt`.** The `modified-at` key is not
+  where it is expected in the reply. Cosmetic — it is only a hint in the
+  picker — but it means the list cannot be sorted by recency yet.
 
 - ~~**Worktree install cost.**~~ Answered in T1.1: a sibling worktree does get
   its own store. Installing this package alone costs 5 packages and under a
@@ -257,6 +287,21 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   a loose password beside an `AccountRef`, which allows pairing a password with
   the wrong email and makes every caller handle a secret. The account file
   already carries both.
+- 2026-09-20: **The supervisor allocates ports, not the lane.** Reversed after
+  the first two-lane run: both lanes probed the container before either had
+  started a server, and both took 4601. Choosing a port is a read followed by a
+  write, and only the supervisor can see a lane's siblings — so `open` is
+  serialised and holds a reservation until the lane is closed. The lane still
+  checks a port it is handed, which is what catches an operator's mistake when
+  `runLane` is used directly.
+- 2026-09-20: **A session is ensured before any lane opens.** Also from the
+  first live run: with no session the workspace URL redirects to the login
+  page, nothing errors, and the lane waits ninety seconds before blaming the
+  plugin. `ensureSession` runs once per account, before a browser holds the
+  profile, and logs in when the account file has credentials.
+- 2026-09-20: **`--no-tui` keeps itself alive, and exits non-zero when every
+  lane has failed.** It exited 13 — Node's unsettled top-level await — the
+  moment the last lane settled, which is neither actionable nor a hint.
 - 2026-09-20: **The form is a pure model in `tui/form.ts`.** The first cut put
   key handling in the input loop and the form came out read-only. Moving the
   model and its `applyKey` out makes every key testable and leaves `run.ts`

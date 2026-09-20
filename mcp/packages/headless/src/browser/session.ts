@@ -182,3 +182,31 @@ export function isSessionOnly(cookie: StoredCookie): boolean {
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+/**
+ * Makes sure the account's profile holds a session, logging in when it does not.
+ *
+ * Called before any lane opens, and never from inside one: one profile
+ * directory holds one Chromium, so a lane that tried to log in would fight the
+ * browser its own pool had already started.
+ *
+ * This exists because the failure it prevents is unreadable. Without a session
+ * the workspace URL redirects to the login page, the page loads, nothing
+ * errors, and the lane waits ninety seconds before reporting that the plugin
+ * never dialled -- which points at the plugin, the port and the injection
+ * before it points at the session. Measured here on the first live run.
+ */
+export async function ensureSession(account: Account, store: SessionStore, signal: AbortSignal): Promise<void> {
+    if (await store.has(account)) return;
+
+    if (account.email === undefined || account.password === undefined) {
+        fail(
+            "not-configured",
+            `${account.name} has no session and no password to make one; ` +
+                `log in once with a window, or put credentials in its account file`,
+            { account: account.name }
+        );
+    }
+
+    await store.loginWithPassword(account, signal);
+}

@@ -11,8 +11,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import { HELP, parseArgs, type LaneRequest, type Options } from "./args.ts";
 import { load, type ConfigIo, type Settings } from "./core/config.ts";
 import { isLauncherError } from "./core/errors.ts";
-import { flavourOf, playwrightLaunch } from "./browser/launch.ts";
+import { flavourOf, playwrightLaunch, playwrightSessions } from "./browser/launch.ts";
 import { LeasingPool } from "./browser/pool.ts";
+import { ensureSession, sessionStore } from "./browser/session.ts";
 import { backendFor, type ExecBackend } from "./exec/backend.ts";
 import type { LaneDeps, LaneSpec } from "./supervisor/lane.ts";
 import { describe as describeLeftover, scan } from "./supervisor/leftovers.ts";
@@ -150,25 +151,61 @@ async function headless(
         }
     });
 
-    for (const lane of options.lanes) {
-        try {
-            await supervisor.open(specFor(lane, settings, env));
-        } catch (err) {
-            io.err.write(`${message(err)}\n`);
-            await supervisor.shutdown(10_000);
-            return 1;
+    const store = sessionStore(playwrightSessions(launchOptions(env)));
+
+    try {
+        // Once per account, before any browser holds its profile.
+        for (const name of new Set(options.lanes.map((lane) => lane.account))) {
+            const account = settings.accounts.get(name);
+            if (account !== undefined) await ensureSession(account, store, AbortSignal.timeout(60_000));
         }
+        for (const lane of options.lanes) {
+            await supervisor.open(specFor(lane, settings, env));
+        }
+    } catch (err) {
+        io.err.write(`${message(err)}\n`);
+        await supervisor.shutdown(10_000);
+        return 1;
     }
 
-    await new Promise<void>((resolve) => {
-        for (const signal of ["SIGINT", "SIGTERM"] as const) {
-            process.once(signal, () => resolve());
-        }
-    });
-
+    const code = await waitForStop(supervisor, io);
     const { forced } = await supervisor.shutdown(15_000);
     if (forced > 0) io.err.write(`${forced} lane(s) had to be forced\n`);
-    return 0;
+    return code;
+}
+
+/**
+ * Holds the process open until a signal, or until nothing is left running.
+ *
+ * The keep-alive timer is load-bearing. Without it Node finds an empty event
+ * loop the moment every lane has settled and exits 13 for an unsettled
+ * top-level await, which is neither a code anyone can act on nor a hint about
+ * what went wrong.
+ *
+ * Exiting non-zero once every lane has failed is the systemd shape: the unit
+ * fails and gets restarted, rather than sitting up with nothing running.
+ */
+function waitForStop(supervisor: LaneSupervisor, io: Io): Promise<number> {
+    return new Promise<number>((resolve) => {
+        const keepAlive = setInterval(() => undefined, 1 << 30);
+
+        const finish = (code: number) => {
+            clearInterval(keepAlive);
+            unsubscribe();
+            resolve(code);
+        };
+
+        const unsubscribe = supervisor.subscribe((records) => {
+            if (records.length > 0 && records.every((record) => record.state === "failed")) {
+                io.err.write("every lane failed\n");
+                finish(1);
+            }
+        });
+
+        for (const signal of ["SIGINT", "SIGTERM"] as const) {
+            process.once(signal, () => finish(0));
+        }
+    });
 }
 
 /** Turns a command-line lane into the spec the supervisor takes. */
