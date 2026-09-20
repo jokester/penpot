@@ -16,8 +16,9 @@ export type ErrorCode =
     | "blank-id"
     /** An id was present and not a UUID. */
     | "bad-id"
-    /** A workspace URL carried no team-id, which renders nothing at all. */
-    | "no-team-id"
+    /** An id the caller must supply was absent -- a workspace URL with no
+     *  team-id renders nothing at all, which is invariant 1. */
+    | "missing-id"
     /** A port sits outside the range the deployment publishes. */
     | "port-out-of-range"
     /** A port is already serving inside the container. */

@@ -45,9 +45,9 @@ tool, not multi-host.
 Never kill a worker you did not start (IMPL-HANDOFF §2).
 
 - **Package**: `@penpot/mcp-headless` in `mcp/packages/headless`, bin
-  `mcp-headless`. Standalone pnpm: its own `pnpm-lock.yaml`, **not** a member of
-  `mcp/pnpm-workspace.yaml`, same shape as `mcp/packages/host` today. It does
-  carry the repo-wide `packageManager` field, which host lacks — without it
+  `mcp-headless`. Standalone pnpm: its own `pnpm-workspace.yaml` **and** its own
+  `pnpm-lock.yaml`, a member of nothing. It carries the repo-wide
+  `packageManager` field, which `mcp/packages/host` lacks — without it
   `corepack use` stamps an ancestor and the package silently never gets swept
   (`mem:workflow/updating-pnpm`).
 - **Playwright is pinned to `1.62.1` exactly**, matching the root workspace's
@@ -84,7 +84,7 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   `… run test` both exit 0, and `git check-ignore` confirms `node_modules` is
   ignored while `pnpm-lock.yaml` is tracked.
 
-- [ ] **T1.2 `core/target.ts`.** `AccountRef`, `DocumentRef`, `workspaceUrl`,
+- [x] **T1.2 `core/target.ts`.** `AccountRef`, `DocumentRef`, `workspaceUrl`,
   `parseWorkspaceUrl`. `teamId` is non-optional (invariant 1); blank and absent
   ids throw rather than returning an empty string (invariant 2). — acceptance:
   tests cover a round trip, an optional `page-id`, `file-id=` with an empty
@@ -247,6 +247,16 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   prose, API.md and IMPL-HANDOFF all say `exec/`. Fixed in T1.1.
 - 2026-09-20: **The plan lives here, not in `docs/`.** `docs/` is Penpot's
   Eleventy documentation site.
+- 2026-09-20: **`workspaceUrl` emits the legacy hash form, and
+  `parseWorkspaceUrl` reads both.** Found in T1.2:
+  `frontend/src/app/main/ui/routes.cljs` on `develop` has moved to
+  query-string routing (`?screen=workspace&…`) and keeps `#/workspace?…` only
+  "during the compatibility window", with a TODO to delete it. The deployed
+  2.17 instances still answer the hash form, so that is what a worker is told;
+  reading both costs nothing and is what an operator pasting a URL needs.
+- 2026-09-20: **`no-team-id` became `missing-id` with the field in the
+  detail.** One code for any absent id reads better than a code per field, and
+  the message still names team-id where invariant 1 applies.
 - 2026-09-20: **The package declares its own `pnpm-workspace.yaml`.** Found in
   T1.1: without one, pnpm walks up to `mcp/pnpm-workspace.yaml` and installs
   that workspace's four projects, skipping this directory in silence — no
