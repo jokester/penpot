@@ -1,11 +1,11 @@
 // Browsers, shared between lanes, one tab each.
 //
-// Types only for now; `launch.ts` implements them. They live here rather than
-// beside the lane because the lane must not be able to name Playwright, and
-// because the numbers behind the sharing belong with the interface: measured on
-// this host a browser and its first tab cost 527 MB and each further tab 94 MB,
-// so five lanes are one browser rather than five.
+// They live here rather than beside the lane because the lane must not be able
+// to name Playwright, and because the numbers behind the sharing belong with
+// the interface: measured on this host a browser and its first tab cost 527 MB
+// and each further tab 94 MB, so five lanes are one browser rather than five.
 
+import type { AccountRef } from "../core/target.ts";
 import type { Wiring } from "../core/topology.ts";
 
 /**
@@ -26,6 +26,8 @@ export interface BrowserKey {
 
 /** What a tab is opened for. */
 export interface LeaseInit {
+    /** Whose session, and therefore whose profile directory, the browser uses. */
+    readonly account: AccountRef;
     /** Decides the injected socket and what counts as the plugin's socket. */
     readonly wiring: Wiring;
     /** The workspace URL to open. */
@@ -53,9 +55,110 @@ export interface Lease {
     close(): Promise<void>;
 }
 
+/**
+ * One browser process, and the tabs it can open.
+ *
+ * The narrow view the pool needs, so the refcounting is testable without
+ * Playwright. `launch.ts` implements it.
+ */
+export interface BrowserSession {
+    openTab(init: LeaseInit, signal: AbortSignal): Promise<Lease>;
+    close(): Promise<void>;
+}
+
+/** Starts a browser for a key. Swapped for a fake in the pool's own tests. */
+export type Launch = (key: BrowserKey, init: LeaseInit, signal: AbortSignal) => Promise<BrowserSession>;
+
 /** Browsers keyed by what they cannot share, leased a tab at a time. */
 export interface BrowserPool {
     lease(key: BrowserKey, init: LeaseInit, signal: AbortSignal): Promise<Lease>;
     /** Closes every browser. The supervisor's last act. */
     closeAll(): Promise<void>;
+}
+
+/**
+ * Browsers created with their first lease and closed with their last.
+ *
+ * Worth doing rather than one browser per lane: measured here, three lanes as
+ * tabs cost about 715 MB and as separate browsers about 1581 MB.
+ *
+ * It also dissolves invariant 8 rather than enforcing it. "One profile
+ * directory per document" existed only because one browser per lane meant
+ * several processes fighting over one profile lock; sharing the process removes
+ * the contention and the workaround together.
+ */
+export class LeasingPool implements BrowserPool {
+    readonly #launch: Launch;
+    readonly #browsers = new Map<string, { session: BrowserSession; leases: number }>();
+
+    constructor(launch: Launch) {
+        this.#launch = launch;
+    }
+
+    async lease(key: BrowserKey, init: LeaseInit, signal: AbortSignal): Promise<Lease> {
+        const id = identify(key);
+        let entry = this.#browsers.get(id);
+
+        if (entry === undefined) {
+            entry = { session: await this.#launch(key, init, signal), leases: 0 };
+            this.#browsers.set(id, entry);
+        }
+
+        let tab: Lease;
+        try {
+            tab = await entry.session.openTab(init, signal);
+        } catch (err) {
+            // A browser started for a tab that never opened is a leak, and the
+            // lane that would have closed it does not exist.
+            await this.#dropIfIdle(id);
+            throw err;
+        }
+
+        entry.leases += 1;
+        return this.#wrap(id, tab);
+    }
+
+    async closeAll(): Promise<void> {
+        const sessions = [...this.#browsers.values()].map((entry) => entry.session);
+        this.#browsers.clear();
+        await Promise.all(sessions.map((session) => session.close().catch(() => undefined)));
+    }
+
+    /** Browsers currently open, for an ownership assertion. */
+    get open(): number {
+        return this.#browsers.size;
+    }
+
+    /** Gives back the tab, and the browser too when it was the last one out. */
+    #wrap(id: string, tab: Lease): Lease {
+        let closed = false;
+        return {
+            waitForPlugin: (timeoutMs, signal) => tab.waitForPlugin(timeoutMs, signal),
+            close: async () => {
+                if (closed) return;
+                closed = true;
+
+                try {
+                    await tab.close();
+                } finally {
+                    const entry = this.#browsers.get(id);
+                    if (entry !== undefined) entry.leases -= 1;
+                    await this.#dropIfIdle(id);
+                }
+            },
+        };
+    }
+
+    async #dropIfIdle(id: string): Promise<void> {
+        const entry = this.#browsers.get(id);
+        if (entry === undefined || entry.leases > 0) return;
+
+        this.#browsers.delete(id);
+        await entry.session.close().catch(() => undefined);
+    }
+}
+
+/** The key as one string, since a Map compares objects by identity. */
+function identify(key: BrowserKey): string {
+    return [key.account, key.headed ? "headed" : "headless", key.flavour].join(" ");
 }

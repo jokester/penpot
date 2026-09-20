@@ -157,18 +157,18 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
 
 ## Milestone 4 — Browser and Penpot
 
-- [ ] **T4.1 `browser/launch.ts` + `browser/pool.ts`.** Ported from
+- [x] **T4.1 `browser/launch.ts` + `browser/pool.ts`.** Ported from
   `mcp/packages/host/config.js`. Leases keyed by (account, headed, flavour);
   the browser closes with its last lease. — acceptance: refcount and key
   equality tested against a fake launcher, including a lease failure not
   leaking a browser. The three-tabs-three-injected-URIs regression runs for
   real behind `MCP_HEADLESS_E2E=1`.
 
-- [ ] **T4.2 `browser/session.ts` + `browser/page.ts`.** The session store and
-  `waitForPluginSocket`, the single readiness signal (invariant 10). —
-  acceptance: against a fake `Page` emitting websocket events, the wait resolves
-  on a matching URL, ignores a non-matching one, times out with `null`, and
-  rejects promptly on abort rather than at the deadline.
+- [ ] **T4.2 `browser/session.ts`.** The session store: does this profile hold
+  a session, log in by password, log in interactively. (`browser/page.ts` moved
+  into T4.1 — the pool cannot open a tab without it.) — acceptance: the cookie
+  check and both login paths are driven against a fake context; the interactive
+  path waits for the cookie to exist rather than for the window to close.
 
 - [ ] **T4.3 `penpot/rpc.ts`.** Login, teams, recent files, read the MCP token —
   with an injected `fetch` and the cookie passed explicitly, because Node will
@@ -247,6 +247,15 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   prose, API.md and IMPL-HANDOFF all say `exec/`. Fixed in T1.1.
 - 2026-09-20: **The plan lives here, not in `docs/`.** `docs/` is Penpot's
   Eleventy documentation site.
+- 2026-09-20: **`browser/page.ts` moved from T4.2 into T4.1.** The pool cannot
+  open a tab without the readiness watch, so splitting them would have meant
+  merging a pool that could not be used. `browser/session.ts` is T4.2 on its
+  own.
+- 2026-09-20: **The pool takes a `Launch` function, not a Playwright handle.**
+  Refcounting, keying and close-with-the-last-lease are the parts that can be
+  wrong, and they are now testable with no browser at all. The real browser
+  appears in two opt-in tests, one of which is the per-tab injection
+  measurement the whole sharing design rests on.
 - 2026-09-20: **A lane is keyed by a handle, not by its port.** SPEC §1 says
   the port identifies a lane, but the port is not known until the lane has
   asked the container what is free — so `open` cannot return one. The

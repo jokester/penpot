@@ -129,7 +129,7 @@ async function open(
             onEvent({ state: "opening", detail: "opening the workspace" });
             const lease = await deps.pool.lease(
                 { account: spec.account.name, headed: spec.headed, flavour: spec.flavour ?? "" },
-                { wiring, url: workspaceUrl(spec.account, spec.document) },
+                { account: spec.account, wiring, url: workspaceUrl(spec.account, spec.document) },
                 signal
             );
             try {
