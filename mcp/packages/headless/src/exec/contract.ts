@@ -74,9 +74,13 @@ export function execBackendContract(name: string, make: () => Promise<ContractHa
     });
 
     test(`${name}: exposing a port nothing serves is refused`, async () => {
+        // The case that caught a real bug: under compose, Docker's proxy
+        // accepts a TCP connection on every published port whether or not
+        // anything is behind it, so a connect-based check called an empty port
+        // reachable. Only an exchange distinguishes.
         const h = await make();
         try {
-            await assert.rejects(() => h.backend.expose(h.deadPort(), AbortSignal.timeout(5_000)));
+            await assert.rejects(() => h.backend.expose(h.deadPort(), AbortSignal.timeout(20_000)));
         } finally {
             await h.cleanup([]);
         }

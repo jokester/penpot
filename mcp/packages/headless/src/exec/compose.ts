@@ -5,7 +5,7 @@
 // the only spelling that works regardless of how the compose file is named.
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { connect } from "node:net";
+import { request } from "node:http";
 import { resolve } from "node:path";
 
 import type { Deployment } from "../core/config.ts";
@@ -150,14 +150,15 @@ export class ComposeBackend implements ExecBackend {
     }
 
     /**
-     * Proves the port is reachable on loopback, and opens nothing.
+     * Proves the port answers on loopback, and opens nothing.
      *
      * Compose publishes the range already, so there is no tunnel to own here --
      * but a port outside the published range starts a server that works
      * perfectly and that nothing can reach (invariant 3), and the honest place
      * to discover that is when the lane opens rather than at the first tool
-     * call. This also replaces the shell script's readiness loop: the server has
-     * only just been started, so the first few connections are expected to fail.
+     * call. This also replaces the shell script's readiness loop: the server
+     * has only just been started, so the first few attempts are expected to
+     * fail.
      */
     async expose(port: number, signal: AbortSignal): Promise<Exposure> {
         const deadline = Date.now() + this.#reachableTimeoutMs;
@@ -206,17 +207,33 @@ export class ComposeBackend implements ExecBackend {
     }
 }
 
-/** True when something accepts a TCP connection on loopback. */
+/**
+ * True when something on loopback answers an HTTP request on `port`.
+ *
+ * An HTTP exchange, not a TCP connect, and the difference is the whole point.
+ * Docker's proxy accepts a connection on every published port whether or not
+ * anything is behind it inside the container, so a connect to a free port in
+ * the range succeeds and then resets. Measured on this host: connecting to a
+ * published, unoccupied 4608 succeeded, and the GET that followed failed with
+ * ECONNRESET. A connect-based check would have called every port in the range
+ * reachable -- the same lie invariant 5 describes, from the other direction.
+ *
+ * Any response counts, status included. A bare GET to an MCP endpoint is
+ * answered with a 4xx, and that is still proof that a server is behind the
+ * published port.
+ */
 function reachable(port: number): Promise<boolean> {
     return new Promise((resolveP) => {
-        const socket = connect({ host: "127.0.0.1", port, timeout: 1000 });
-        const finish = (ok: boolean) => {
-            socket.destroy();
-            resolveP(ok);
-        };
-        socket.once("connect", () => finish(true));
-        socket.once("error", () => finish(false));
-        socket.once("timeout", () => finish(false));
+        const req = request({ host: "127.0.0.1", port, path: "/mcp", method: "GET", timeout: 1000 }, (res) => {
+            res.resume();
+            resolveP(true);
+        });
+        req.on("error", () => resolveP(false));
+        req.on("timeout", () => {
+            req.destroy();
+            resolveP(false);
+        });
+        req.end();
     });
 }
 

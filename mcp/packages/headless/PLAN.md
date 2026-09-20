@@ -247,6 +247,14 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   prose, API.md and IMPL-HANDOFF all say `exec/`. Fixed in T1.1.
 - 2026-09-20: **The plan lives here, not in `docs/`.** `docs/` is Penpot's
   Eleventy documentation site.
+- 2026-09-20: **Reachability is an HTTP exchange, never a TCP connect.** The
+  contract suite caught this against the live stack: Docker's proxy accepts a
+  connection on every published port whether or not anything is behind it, so
+  connecting to a free 4608 succeeded and the GET that followed failed with
+  ECONNRESET. A connect-based check would have called every port in the range
+  reachable — the same lie invariant 5 describes, from the other direction.
+  Worth adding to SPEC §11 as a twelfth invariant when that section is next
+  touched.
 - 2026-09-20: **`ExecBackend` gained `log(pid)`.** A failed lane's event
   carries the last output lines (API.md), and only the backend has them. It
   also reads the in-container pid off the process's own stream rather than out
