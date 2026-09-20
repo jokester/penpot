@@ -55,6 +55,8 @@ export interface LaneSpec {
     readonly port?: PortPair;
     /** Channel and argument fingerprint, which decides which browser it shares. */
     readonly flavour?: string;
+    /** The X display for a headed lane. Ignored when headless. */
+    readonly display?: string;
 }
 
 /** The I/O edges, passed in so the state machine can be driven by fakes. */
@@ -128,7 +130,12 @@ async function open(
         try {
             onEvent({ state: "opening", detail: "opening the workspace" });
             const lease = await deps.pool.lease(
-                { account: spec.account.name, headed: spec.headed, flavour: spec.flavour ?? "" },
+                {
+                    account: spec.account.name,
+                    headed: spec.headed,
+                    flavour: spec.flavour ?? "",
+                    ...(spec.headed && spec.display !== undefined ? { display: spec.display } : {}),
+                },
                 { account: spec.account, wiring, url: workspaceUrl(spec.account, spec.document) },
                 signal
             );

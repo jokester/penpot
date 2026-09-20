@@ -231,7 +231,7 @@ Raised 2026-09-21 after the first proper look at the interface.
   `file-id`, `team-id` and client URL; no line runs past the terminal at any of
   five widths.
 
-- [ ] **T7.2 Carry `--display` through to the browser.** It is parsed,
+- [x] **T7.2 Carry `--display` through to the browser.** It is parsed,
   validated and then dropped: `display` appears nowhere outside `args.ts`, so a
   headed lane can only ever use the ambient `DISPLAY`. — acceptance: the display
   reaches `launchPersistentContext`'s environment; it is part of the browser key,

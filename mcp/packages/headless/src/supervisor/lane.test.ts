@@ -287,6 +287,28 @@ test("an operator's usable port is honoured", async () => {
     await running;
 });
 
+test("a headless lane carries no display, whatever the spec says", async () => {
+    const h = harness({ headed: false, display: ":3" });
+    const running = h.run();
+
+    await waitFor(() => h.events.some((e) => e.state === "connected"));
+    assert.equal(h.pool.lastKey?.display, undefined, "a headless browser has no screen to be on");
+
+    h.control.abort();
+    await running;
+});
+
+test("a headed lane leases a browser on its own display", async () => {
+    const h = harness({ headed: true, display: ":3" });
+    const running = h.run();
+
+    await waitFor(() => h.events.some((e) => e.state === "connected"));
+    assert.equal(h.pool.lastKey?.display, ":3");
+
+    h.control.abort();
+    await running;
+});
+
 test("the tab is leased with the wiring and URL the lane decided", async () => {
     const h = harness({ headed: true, flavour: "chrome" });
     const running = h.run();

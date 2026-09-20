@@ -22,6 +22,14 @@ export interface BrowserKey {
     readonly headed: boolean;
     /** Channel and argument fingerprint; two flavours cannot share a process. */
     readonly flavour: string;
+    /**
+     * The X display a headed browser is on.
+     *
+     * Part of the key because a process is launched onto one display and cannot
+     * move: two headed lanes on different screens are two browsers, however
+     * much else they share.
+     */
+    readonly display?: string;
 }
 
 /** What a tab is opened for. */
@@ -160,5 +168,5 @@ export class LeasingPool implements BrowserPool {
 
 /** The key as one string, since a Map compares objects by identity. */
 function identify(key: BrowserKey): string {
-    return [key.account, key.headed ? "headed" : "headless", key.flavour].join(" ");
+    return [key.account, key.headed ? "headed" : "headless", key.flavour, key.display ?? ""].join(" ");
 }

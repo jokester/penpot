@@ -125,8 +125,13 @@ test("closing a lease twice is not a double release", async () => {
     assert.equal(l.sessions[0]?.closed, 1);
 });
 
-test("the three axes of the key each force a second browser", async () => {
-    for (const other of [key({ account: OTHER.name }), key({ headed: true }), key({ flavour: "chrome" })]) {
+test("the axes of the key each force a second browser", async () => {
+    for (const other of [
+        key({ account: OTHER.name }),
+        key({ headed: true }),
+        key({ flavour: "chrome" }),
+        key({ headed: true, display: ":3" }),
+    ]) {
         const l = launcher();
         const pool = new LeasingPool(l.launch);
 
@@ -204,4 +209,27 @@ test("the flavour names what cannot be varied per tab", () => {
     assert.equal(flavourOf({ channel: "chrome" }), "chrome");
     assert.equal(flavourOf({ args: ["--use-gl=angle", "--use-angle=gl-egl"] }), "--use-gl=angle --use-angle=gl-egl");
     assert.notEqual(flavourOf({ channel: "chrome" }), flavourOf({}));
+});
+
+test("two headed lanes on different screens are two browsers", async () => {
+    // A browser is launched onto one display and cannot move, so the display
+    // belongs in the key however much else the two lanes share.
+    const l = launcher();
+    const pool = new LeasingPool(l.launch);
+
+    await pool.lease(key({ headed: true, display: ":3" }), init(), SIGNAL);
+    await pool.lease(key({ headed: true, display: ":4" }), init(), SIGNAL);
+
+    assert.equal(l.sessions.length, 2);
+});
+
+test("two headed lanes on one screen share a browser", async () => {
+    const l = launcher();
+    const pool = new LeasingPool(l.launch);
+
+    await pool.lease(key({ headed: true, display: ":3" }), init(), SIGNAL);
+    await pool.lease(key({ headed: true, display: ":3" }), init(), SIGNAL);
+
+    assert.equal(l.sessions.length, 1);
+    assert.equal(l.keys[0]?.display, ":3");
 });

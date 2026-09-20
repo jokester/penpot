@@ -224,6 +224,9 @@ export function specFor(lane: LaneRequest, settings: Settings, env: NodeJS.Proce
         mode: lane.mode,
         headed: lane.headed,
         flavour: flavourOf(launchOptions(env)),
+        // Falls back to the launcher's own screen, which is what a person
+        // means by --headed with DISPLAY already set.
+        ...(lane.headed ? { display: lane.display ?? env.DISPLAY ?? "" } : {}),
         ...(lane.port === undefined ? {} : { port: { http: lane.port, ws: lane.port + 1 } }),
     };
 }

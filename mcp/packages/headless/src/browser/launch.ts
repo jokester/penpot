@@ -72,6 +72,12 @@ export function playwrightLaunch(options: LaunchOptions = {}): Launch {
             ...(options.channel === undefined || options.channel === "" ? {} : { channel: options.channel }),
             args: [...NO_THROTTLE_ARGS, ...(options.args ?? [])],
             viewport: { width: 1440, height: 900 },
+            // A headed browser has to be told which screen. Without this it
+            // inherits the launcher's own DISPLAY, so --display was accepted
+            // and then quietly ignored.
+            ...(key.display === undefined || key.display === ""
+                ? {}
+                : { env: { ...process.env, DISPLAY: key.display } }),
         });
 
         // A ws://localhost dialled from a public https origin is a
