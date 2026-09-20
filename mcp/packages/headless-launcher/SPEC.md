@@ -87,15 +87,57 @@ One process owns everything. A lane is a task, not a process:
         │    └── lane 4605  task ──▶ chromium C (child)          │
         │  TUI renders supervisor state, sends intents           │
         └───────────────────────────────────────────────────────┘
-                   │ docker compose exec
+                   │ ExecBackend: compose exec | kubectl exec
                    ▼
-        penpot-mcp container: three `node index.js` on 4601/4603/4605
+        penpot-mcp container/pod: three `node index.js` on 4601/4603/4605
 ```
 
 Several lanes run concurrently in one Node process as structured concurrency —
 coroutines under a parent that can cancel them — not one OS process each. That
 is what "not necessarily an OS process" means here: the supervised unit is the
 lane, and only its two halves are real processes.
+
+### The execution backend is pluggable
+
+The containers are stock and someone else's, and they are moving from Docker
+Compose to Kubernetes. The launcher must not notice. Everything it needs from a
+container runtime goes through one interface:
+
+```ts
+interface ExecBackend {
+  readonly kind: "compose" | "kubectl";
+  /** Run a short command in the MCP container and collect its output. */
+  run(argv: string[], signal: AbortSignal): Promise<ExecResult>;
+  /** Start a long-lived process there; resolves once its in-container pid is known. */
+  start(argv: string[], env: Env, signal: AbortSignal): Promise<RemoteProcess>;
+  /** Kill an in-container pid (invariant 6 — the exec client dying is not enough). */
+  kill(pid: number): Promise<void>;
+  /** Ports listening inside the container, IPv4 and IPv6 (invariant 4). */
+  listening(): Promise<number[]>;
+  /** Make an in-container port reachable locally. */
+  expose(port: number, signal: AbortSignal): Promise<Exposure>;
+}
+```
+
+`expose` is the method that earns the abstraction, because the two runtimes
+differ in kind rather than in syntax:
+
+| | **compose** | **kubectl** |
+| --- | --- | --- |
+| reach a port | already published (`4601-4608`) — `expose` is a no-op | **`kubectl port-forward` — a child process per lane** |
+| target | a service name | a pod resolved by label selector, re-resolved each call |
+| port constraint | must sit in the published range (invariant 3) | any free in-pod port; the *local* port is ours to choose |
+| a restart means | the container keeps its name | the pod name changes |
+
+So under Kubernetes a lane owns **three** things, not two: the in-pod MCP
+server, the port-forward, and the browser. That fits the generator unchanged —
+one more resource acquired in sequence and released in `finally` — but the
+port-forward is the flakiest of the three and needs its own health signal: if it
+dies, the lane is `failed` even though both real halves are alive and well.
+
+Invariant 3 is therefore backend-specific and belongs to the backend, not to
+`core/ports.ts`: the rule is *the agent must be able to reach the lane's MCP
+port*, and each backend says how.
 
 ### Ownership is total, and that is the simplification
 
@@ -288,10 +330,20 @@ job and stays a subcommand:
 
 Three layers, most specific wins:
 
-1. **Deployment** — `deployment.json`: compose project directory, MCP service
-   name, published port range. The only place that knows Docker exists. Absent
-   ⇒ `--mode exec` is unavailable and everything else still works, which is what
-   keeps the package honest about k8s and about cloud.
+1. **Deployment** — `deployment.json`, which selects and configures the exec
+   backend and is the only place that knows a container runtime exists:
+
+   ```json
+   { "backend": "compose", "projectDir": "../../deploy/home-cluster",
+     "service": "penpot-mcp", "portRange": [4601, 4608] }
+   ```
+   ```json
+   { "backend": "kubectl", "context": "home", "namespace": "penpot",
+     "selector": "app=penpot-mcp", "localPortRange": [4601, 4608] }
+   ```
+
+   Absent ⇒ `--mode exec` is unavailable and everything else still works, which
+   is what keeps the package honest about cloud.
 2. **Account** — `accounts/<name>.env`, mode 600, the shape `provision-worker`
    writes today: origin, email, password, MCP token, profile directory.
    Unchanged, so existing files keep working.
@@ -310,13 +362,16 @@ Each cost real time to learn; each becomes an assertion with a test.
    nothing.
 2. **Blank ids are refused.** `file-id=` with an empty value silently drives the
    wrong thing.
-3. In exec mode **both ports must sit inside the published range**, HTTP and
-   WebSocket alike, or the server runs perfectly and nothing can reach it.
+3. In exec mode **the agent must be able to reach the lane's MCP port**, HTTP
+   and WebSocket alike, or the server runs perfectly and nothing can reach it.
+   How is the backend's business: compose requires both ports inside the
+   published range; kubectl requires a live port-forward.
 4. Busy-port detection reads **`/proc/net/tcp` *and* `tcp6`** — HTTP binds IPv4,
    the WebSocket binds IPv6.
-5. Ports are probed **inside the container**; Docker publishes the whole range,
-   so every host-side check says "in use".
-6. **A `docker compose exec` client dying does not stop what it started.**
+5. Ports are probed **inside the container**, never from the host. Docker
+   publishes the whole range, so every host-side check says "in use"; under
+   kubectl the host cannot see them at all.
+6. **An exec client dying does not stop what it started**, with either backend.
    Record the in-container pid; kill it explicitly.
 7. The worker talks to **`localhost`, never a LAN address** — hardened session
    cookies are `Secure` and only loopback is trustworthy.
@@ -359,8 +414,8 @@ mcp/packages/headless-launcher/
   test/                 node:test, one file per core module
 ```
 
-`core/` and `supervisor/lane.ts` are pure and fully tested. `browser/`,
-`docker/` and `penpot/` are the I/O edges. `tui/` is a renderer over supervisor
+`core/`, `supervisor/lane.ts` and `exec/procnet.ts` are pure and fully tested.
+`browser/`, the `exec/` backends and `penpot/` are the I/O edges. `tui/` is a renderer over supervisor
 state and holds no logic of its own.
 
 ## 13. Testing
@@ -371,7 +426,11 @@ state and holds no logic of its own.
   and retry.
 - **Edges against fixtures**: a captured `/proc/net/tcp` pair (including an
   IPv6-only WebSocket port), a captured `get-teams` / `get-team-recent-files`
-  response, a captured `docker compose exec` transcript. No live stack.
+  response, and a transcript per backend. No live stack.
+- **Both backends run the same suite.** `ExecBackend` gets one contract test —
+  start a process, see its port in `listening()`, expose it, kill it, see the
+  port released — run against a fake, against compose, and against kubectl when
+  a cluster is configured. That is what keeps the k8s move from being a rewrite.
 - **The ownership contract gets its own test**, because it is the whole point:
   open two lanes, quit, and assert that both browsers and both in-container
   servers are gone and both ports are free. Then the ugly half: `SIGKILL` the
@@ -410,18 +469,27 @@ path (`--browser container`, today's image-pinned browser) needs the crashpad
 flags worked out and is worth revisiting only if host Playwright drifts from the
 image often enough to matter.
 
-### 14.4 `--mode builtin` against cloud — still undriven
+### 14.4 Port-forward supervision — open
+
+Under kubectl a lane's reachability is a child process that can die on its own,
+and `kubectl port-forward` is known to drop on pod restarts and idle timeouts.
+Restarting it transparently keeps the lane alive but hides a real fault;
+failing the lane is honest but noisy. Proposed: restart it a bounded number of
+times, surface the count in the TUI row, and fail the lane once it is exhausted.
+Undecided until there is a cluster to measure against.
+
+### 14.5 `--mode builtin` against cloud — still undriven
 
 If it works, the worker reduces to a browser and a URL and `topology.ts` gets
 simpler. Worth resolving before that module is written rather than after.
 
-### 14.5 One account, many documents — open
+### 14.6 One account, many documents — open
 
 Invariant 8 wants one profile per document, but the profile holds the session,
 so N documents means N logins of the same account. It works; whether a shared
 cookie jar with per-document profiles is better is unexplored.
 
-### 14.6 The name — open, and not urgent
+### 14.7 The name — open, and not urgent
 
 `penpot-headless-mcp-launcher` names the first half of the job. The thing
 launches lanes and then supervises them for as long as it runs, and the second
