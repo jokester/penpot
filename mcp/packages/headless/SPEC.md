@@ -593,7 +593,7 @@ timeouts, restarting transparently hides a real fault, and failing the lane is
 noisy. Proposed then — bounded restarts, count visible in the TUI row, fail once
 exhausted. Not worth building until a deployment actually needs the strategy.
 
-### 14.5 `--mode builtin` — half resolved
+### 14.5 `--mode builtin` — self-hosted proven, cloud understood
 
 **Self-hosted: verified working**, 2026-09-20. A worker opened with
 `--mcp builtin` dialled `ws://localhost:9001/mcp/ws`, an MCP client connected to
@@ -612,11 +612,42 @@ Its limits are the familiar ones: the server is shared and multi-user, so the
 client must carry `userToken`, and two builtin lanes would contend for the same
 server.
 
-**Cloud: still undriven**, and blocked on two things rather than on the design —
-Google Chrome is not installed on this host (a non-loopback origin sets
-`channel: "chrome"` because Cloudflare challenges Playwright's headless shell),
-and it needs a cloud account with `mcpEnabled` and an `mcp`-type token. Neither
-is the launcher's problem; both are prerequisites someone has to supply.
+**Cloud: mostly confirmed, 2026-09-20.** A worker opened `--mcp builtin`
+against `design.penpot.app` and its plugin connected to
+`wss://design.penpot.app/mcp/ws` on four separate runs, headless and headed.
+Two prerequisites turned out to be stale:
+
+- **Google Chrome is not required.** Playwright's bundled Chromium loaded the
+  login page, the authenticated dashboard and the workspace with no Cloudflare
+  challenge. `config.js` defaults `CHANNEL` to `"chrome"` for non-loopback
+  origins on the strength of an older measurement; that default, and the claim
+  in `TOPOLOGIES.md` §6, should be re-tested and probably dropped.
+
+What was *not* confirmed is a tool call, and the reason is not the design:
+
+**One `userToken` is one plugin slot, and the slot is sticky.** The token belongs
+to an account, not a tab, so a human tab and a worker on the same account
+compete for it. Worse, the loser is silent: the second connection is *accepted*,
+the first registration keeps routing, and the failure surfaces as `the Penpot
+plugin tab appears to be suspended` — blaming the browser for server-side
+bookkeeping. Reconnecting does not reclaim the slot; across five calls the
+reported "last heartbeat" kept pointing at a moment before the current worker
+had even connected.
+
+Two consequences for this package:
+
+1. **A cloud worker needs its own account**, exactly as the self-hosted worker
+   does. That is not a workaround — it is the same reasoning that produced
+   `mcp-worker@…` in the first place, applied one layer down.
+2. **On cloud, `builtin` does not scale past one lane per account**, because the
+   account has one token and the token has one slot. `local` does: each lane
+   runs its own single-user server on its own port, which ignores `userToken`
+   entirely. So the recommended cloud shape for more than one document is
+   `--mode local`, not `builtin` — the mirror image of self-hosted, where `exec`
+   scales and `builtin` does not, for the same underlying reason.
+
+The supervisor should therefore **refuse to open a second `builtin` lane on one
+account** rather than let it half-work, and say why.
 
 ### 14.6 One account, many documents — decided
 
