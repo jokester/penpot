@@ -277,9 +277,9 @@ Raised 2026-09-21 after the first proper look at the interface.
 - **Nothing non-interactive reaps.** `--check` reports leftovers and the TUI's
   `r` clears them, but a script has no way to. A `--reap` flag is the obvious
   addition.
-- **`recentFiles` returns an empty `modifiedAt`.** The `modified-at` key is not
-  where it is expected in the reply. Cosmetic — it is only a hint in the
-  picker — but it means the list cannot be sorted by recency yet.
+- ~~**`recentFiles` returns an empty `modifiedAt`.**~~ Answered 2026-09-21:
+  Penpot takes kebab-case parameters and answers in camelCase, so every
+  kebab-spelled field read as absent and `isDefault` was always false.
 
 - ~~**Worktree install cost.**~~ Answered in T1.1: a sibling worktree does get
   its own store. Installing this package alone costs 5 packages and under a

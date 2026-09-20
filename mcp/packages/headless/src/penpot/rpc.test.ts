@@ -13,14 +13,27 @@ const SESSION = { cookie: "auth-token=abc123" };
 const TEAM = "fdbdf01d-1111-4222-8333-444455556666";
 const FILE = "0a1b2c3d-4444-4555-8666-777788889999";
 
-/** The shape Penpot answers with: kebab-case keys, and more of them than we read. */
+// Captured from the running instance on 2026-09-21. Penpot takes kebab-case
+// parameters and answers in camelCase; the first version of these fixtures was
+// written from the wrong guess, so every optional field read as absent and
+// isDefault was always false -- and the tests passed, because they agreed with
+// the code rather than with the server.
 const TEAMS = JSON.stringify([
-    { id: TEAM, name: "Your Penpot", "is-default": true, "created-at": "2026-01-01T00:00:00Z" },
-    { id: "aaaaaaaa-1111-4222-8333-444455556666", name: "Shared", "is-default": false },
+    { id: TEAM, name: "Default", isDefault: true, createdAt: "2026-01-01T00:00:00Z", permissions: {} },
+    { id: "aaaaaaaa-1111-4222-8333-444455556666", name: "ihate-workspace", isDefault: false },
 ]);
 
 const FILES = JSON.stringify([
-    { id: FILE, name: "scratch", "modified-at": "2026-09-20T12:00:00Z", "project-id": "p", "row-num": 1 },
+    {
+        id: FILE,
+        name: "worker-scratch",
+        modifiedAt: "2026-09-20T11:21:29.162784Z",
+        createdAt: "2026-09-19T00:00:00Z",
+        projectId: "a666c135-9926-812e-8008-a9e10b11d32a",
+        teamId: TEAM,
+        isShared: false,
+        rowNum: 1,
+    },
 ]);
 
 const TOKENS = JSON.stringify([
@@ -93,24 +106,39 @@ test("a rejected login names the origin and the status", async () => {
 });
 
 test("teams come back with the default one marked", async () => {
+    // isDefault, not is-default. The kebab spelling read false for every team,
+    // including the one actually named Default, which is how it went unnoticed.
     const f = fakeFetch({ "get-teams": { body: TEAMS } });
     const teams = await penpotApi(f.doFetch).teams(ORIGIN, SESSION);
 
     assert.deepEqual(teams, [
-        { id: TEAM, name: "Your Penpot", isDefault: true },
-        { id: "aaaaaaaa-1111-4222-8333-444455556666", name: "Shared", isDefault: false },
+        { id: TEAM, name: "Default", isDefault: true },
+        { id: "aaaaaaaa-1111-4222-8333-444455556666", name: "ihate-workspace", isDefault: false },
     ]);
+    assert.ok(
+        teams.some((team) => team.isDefault),
+        "exactly the bug this replaces: no team ever came back as the default"
+    );
     assert.equal(f.calls[0]?.headers.Cookie, SESSION.cookie);
 });
 
-test("recent files carry the team id the question named", async () => {
-    // The rows do not have one: the query selects files, not memberships. A
-    // DocumentRef needs both ids or the workspace renders nothing.
+test("recent files carry a team id and a modification time", async () => {
     const f = fakeFetch({ "get-team-recent-files": { body: FILES } });
     const files = await penpotApi(f.doFetch).recentFiles(ORIGIN, SESSION, TEAM);
 
-    assert.deepEqual(files, [{ id: FILE, name: "scratch", teamId: TEAM, modifiedAt: "2026-09-20T12:00:00Z" }]);
+    assert.deepEqual(files, [
+        { id: FILE, name: "worker-scratch", teamId: TEAM, modifiedAt: "2026-09-20T11:21:29.162784Z" },
+    ]);
+    // Kebab going out, camel coming back.
     assert.deepEqual(f.calls[0]?.body, { "team-id": TEAM });
+});
+
+test("a file with no team id of its own falls back to the team that was asked about", async () => {
+    const f = fakeFetch({ "get-team-recent-files": { body: '[{"id":"f","name":"n"}]' } });
+    const files = await penpotApi(f.doFetch).recentFiles(ORIGIN, SESSION, TEAM);
+
+    assert.equal(files[0]?.teamId, TEAM);
+    assert.equal(files[0]?.modifiedAt, "");
 });
 
 test("the MCP token is read, and only from the mcp row", async () => {

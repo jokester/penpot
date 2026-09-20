@@ -62,6 +62,12 @@ export type RpcFetch = (
     init: { method: "POST"; headers: Record<string, string>; body: string }
 ) => Promise<RpcResponse>;
 
+// One thing to know before reading the field names below: Penpot takes its
+// parameters in kebab-case and answers in camelCase. `{"team-id": id}` going
+// out, `modifiedAt` and `isDefault` coming back. Assuming kebab in both
+// directions parses cleanly and yields nothing -- every optional field reads as
+// absent and every boolean as false.
+
 /** Builds the API over whatever performs requests. */
 export function penpotApi(doFetch: RpcFetch = globalThis.fetch as unknown as RpcFetch): PenpotApi {
     /** Posts one RPC command and returns its parsed body and any Set-Cookie. */
@@ -118,21 +124,20 @@ export function penpotApi(doFetch: RpcFetch = globalThis.fetch as unknown as Rpc
             return rows(body, "get-teams").map((row) => ({
                 id: str(row, "id"),
                 name: str(row, "name"),
-                isDefault: row["is-default"] === true,
+                isDefault: row.isDefault === true,
             }));
         },
 
         async recentFiles(origin, session, teamId) {
-            // The team id is not in the rows -- the query selects files, not
-            // memberships -- so it comes from the question rather than the
-            // answer. A DocumentRef needs both ids (invariant 1).
             const { body } = await call(origin, "get-team-recent-files", { "team-id": teamId }, session);
 
             return rows(body, "get-team-recent-files").map((row) => ({
                 id: str(row, "id"),
                 name: str(row, "name"),
-                teamId,
-                modifiedAt: String(row["modified-at"] ?? ""),
+                // The rows do carry a teamId, but the question is the authority:
+                // it is the team whose permissions were checked.
+                teamId: typeof row.teamId === "string" && row.teamId !== "" ? row.teamId : teamId,
+                modifiedAt: typeof row.modifiedAt === "string" ? row.modifiedAt : "",
             }));
         },
 
