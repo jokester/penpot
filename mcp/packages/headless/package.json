@@ -6,6 +6,7 @@
     "description": "Long-running supervisor and TUI for headless Penpot MCP lanes.",
     "license": "MPL-2.0",
     "scripts": {
+        "start": "node bin/mcp-headless.ts",
         "test": "node --test 'src/**/*.test.ts'",
         "types:check": "tsc --noEmit"
     },
@@ -16,5 +17,8 @@
     "devDependencies": {
         "@types/node": "^26.1.2",
         "typescript": "^6.0.3"
+    },
+    "bin": {
+        "mcp-headless": "./bin/mcp-headless.ts"
     }
 }

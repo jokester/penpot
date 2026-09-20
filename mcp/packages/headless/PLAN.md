@@ -185,7 +185,7 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   mixed list of states, and a leftovers section; long document names truncate
   rather than wrap; no ANSI escape leaks into the snapshot's measured width.
 
-- [ ] **T5.2 `tui/run.ts` + `main.ts`.** The input loop, `--no-tui`, `--check`,
+- [x] **T5.2 `tui/run.ts` + `main.ts`.** The input loop, `--no-tui`, `--check`,
   and the single exit point. — acceptance: argv table tests including repeated
   lane groups and `--headed` with no `DISPLAY`; `main` returns a code and calls
   `process.exit` nowhere; `--check` against a fake backend prints leftovers and
@@ -257,6 +257,12 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   a loose password beside an `AccountRef`, which allows pairing a password with
   the wrong email and makes every caller handle a secret. The account file
   already carries both.
+- 2026-09-20: **The form is a pure model in `tui/form.ts`.** The first cut put
+  key handling in the input loop and the form came out read-only. Moving the
+  model and its `applyKey` out makes every key testable and leaves `run.ts`
+  with no rules at all — the same reason `render` is a pure function.
+- 2026-09-20: **`bin/mcp-headless.ts` is the only place that exits.** `main`
+  returns a code; a test replaces `process.exit` and asserts nothing calls it.
 - 2026-09-20: **`browser/page.ts` moved from T4.2 into T4.1.** The pool cannot
   open a tab without the readiness watch, so splitting them would have meant
   merging a pool that could not be used. `browser/session.ts` is T4.2 on its
