@@ -119,6 +119,42 @@ The cost is that `launchPersistentContext`'s conveniences are given up for
 explicit CDP wiring, and a crashed launcher leaves browsers that only discovery
 will find — which is exactly what discovery is for.
 
+### A lane is an async generator
+
+```ts
+type LaneEvent =
+  | { state: "opening";   detail: string }
+  | { state: "connected"; port: number; cdpPort: number; document: DocumentRef }
+  | { state: "failed";    reason: string; log: string[] };
+
+async function* openLane(
+  spec: LaneSpec,
+  deps: LaneDeps,
+  signal: AbortSignal,
+): AsyncGenerator<LaneEvent>;
+```
+
+The sequence *is* the state machine: the generator yields each transition as it
+happens, and the supervisor `for await`s it and mirrors the last event into the
+record the TUI renders. `deps` carries the I/O edges (docker, penpot rpc,
+browser) so the generator is testable with fakes and `core/` stays pure.
+
+Three properties this shape has to respect, all of them load-bearing:
+
+- **Cleanup lives in `finally`, and only runs if the iterator is finished or
+  returned.** Dropping the reference never runs it. The supervisor therefore
+  owns every iterator and always calls `.return()` — on abort, on quit, on
+  failure. That single discipline replaces the `trap`, the `exec`, and the
+  fall-through that this rewrite exists to delete.
+- **Generators are pull-based**, so a slow consumer stalls the producer at the
+  `yield`. Health must not depend on the TUI pulling. Once the lane reaches
+  `connected` the generator does not keep yielding heartbeats; it parks on a
+  promise that settles on abort or on failure, while a separate watcher pushes
+  health into the record directly.
+- **Adoption enters the same generator at a later state.** `spec` carries an
+  optional existing CDP endpoint; with it, the generator skips launching and
+  yields `connected` after verifying the tab (§6). One code path, one cleanup.
+
 ### Lane states
 
 ```
@@ -208,13 +244,20 @@ It is **not** in `mcp/pnpm-workspace.yaml` — that lists `common`, `server` and
 which is why `packages/host` was kept out too, and it is what makes npm and its
 `package-lock.json` unremarkable here.
 
-Runtime: **Node ≥ 22, plain JavaScript with JSDoc types, checked by
-`tsc --checkJs --strict`.** JS because there is no build step and the browser
-half is already JS; typed anyway because the bugs were type-shaped — a port that
-was a string, an id that was empty, a URL that was `undefined`.
+Runtime: **TypeScript, run directly by Node, with no build step and no loader.**
 
-Dependency budget: **`playwright` at runtime, nothing else.** Whether the
-supervisor should be built on Effect is §14.1.
+Node strips types natively from 23.6 on; this host is v24.20.0 and
+`node src/main.ts` runs unflagged. So the no-build-step goal and real TypeScript
+are not in tension, and `tsx` is not needed — `mcp/packages/plugin` already
+tests with `node --experimental-strip-types`, so the pattern has a precedent
+here. `tsc --noEmit --strict` type-checks in CI and never produces output.
+
+This became easy for a second reason: under the CDP model no launcher code runs
+inside a container, so nothing has to care whether a container image can run
+TypeScript.
+
+Dependency budget: **`playwright` at runtime, `typescript` in dev, nothing
+else.** The supervisor is hand-rolled (§14.1).
 
 ## 9. Non-interactive surface
 
@@ -285,32 +328,32 @@ Each cost real time to learn; each becomes an assertion with a test.
 mcp/packages/headless-launcher/
   SPEC.md · README.md
   package.json          bin: penpot-headless-mcp-launcher; deps: playwright
-  jsconfig.json         checkJs, strict
+  tsconfig.json         strict, noEmit
   src/
-    main.js             argv → TUI or one non-interactive command; one exit point
+    main.ts             argv → TUI or one non-interactive command; one exit point
     supervisor/
-      lane.js           the state machine of §5
-      supervisor.js     the set of lanes, cancellation scopes, health
-      discovery.js      §6: find and adopt what is already running
+      lane.ts          the state machine of §5
+      supervisor.ts    the set of lanes, cancellation scopes, health
+      discovery.ts     §6: find and adopt what is already running
     core/
-      target.js         account + file + team → workspace URL   (inv. 1, 2)
-      ports.js          allocation and validation               (inv. 3, 4, 5)
-      topology.js       builtin | exec | local                  (inv. 9, 11)
-      config.js         the three layers of §10
+      target.ts        account + file + team → workspace URL   (inv. 1, 2)
+      ports.ts         allocation and validation               (inv. 3, 4, 5)
+      topology.ts      builtin | exec | local                  (inv. 9, 11)
+      config.ts        the three layers of §10
     browser/
-      launch.js         detached chromium with a CDP port       (inv. 7)
-      adopt.js          connectOverCDP, find the workspace tab
-      session.js        cookie, login, profile                  (inv. 8)
-      page.js           open, readiness, reload                 (inv. 10)
+      launch.ts        detached chromium with a CDP port       (inv. 7)
+      adopt.ts         connectOverCDP, find the workspace tab
+      session.ts       cookie, login, profile                  (inv. 8)
+      page.ts          open, readiness, reload                 (inv. 10)
     docker/
-      compose.js        exec, /proc probes, in-container pids    (inv. 5, 6)
+      compose.ts       exec, /proc probes, in-container pids    (inv. 5, 6)
     penpot/
-      rpc.js            login, teams, files, tokens
+      rpc.ts           login, teams, files, tokens
     tui/                list · form · fields · render
   test/                 node:test, one file per core module
 ```
 
-`core/` and `supervisor/lane.js` are pure and fully tested. `browser/`,
+`core/` and `supervisor/lane.ts` are pure and fully tested. `browser/`,
 `docker/` and `penpot/` are the I/O edges. `tui/` is a renderer over supervisor
 state and holds no logic of its own.
 
@@ -329,21 +372,70 @@ state and holds no logic of its own.
 - One opt-in end-to-end smoke against the real deployment that calls
   `execute_code`, which is what `smoke.js` does today.
 
-## 14. Open questions
+## 14. Decisions and remaining questions
 
-1. **Effect, or a hand-rolled supervisor?** The lane model is a natural fit for
-   Effect's fibers and scopes, and it would give cancellation and retry for
-   free. Against: it is a large TypeScript-first dependency in a package whose
-   budget is one dependency and whose language is JS-with-JSDoc.
-   **Proposed:** hand-roll roughly 150 lines over `AbortController`, and revisit
-   if lane composition gets harder than that.
-2. **What does `q` do to a `--headed` browser?** Leaving it running is right for
-   headless and debatable for a visible window on someone's VNC desktop.
-3. **CDP port allocation.** A second range to manage, or derive it from the MCP
-   port (`4603 → 14603`)? Derivation is one less thing to configure and one more
-   collision to reason about.
-4. **Does adoption verify the tab?** A CDP endpoint on the expected port might
-   be a browser we did not start. Matching the profile directory or a marker in
-   the page is cheap insurance.
-5. **`--mode builtin` against cloud is still undriven.** If it works,
-   `topology.js` gets simpler; worth resolving before it is written.
+### 14.1 Supervisor: hand-rolled — decided
+
+Roughly 150 lines over `AbortController` and async generators (§5). Effect is a
+large TypeScript-first dependency for a package whose budget is one runtime
+dependency, and the lane model is small enough to own. Revisit only if lane
+composition outgrows it.
+
+### 14.2 What `q` does to a headed browser — decided
+
+`q` leaves every lane running, headed included, and prints what survived and how
+to get back. Consistency wins: a rule of "headless survives, headed does not" is
+one more thing to remember at the moment you least want a surprise, and a
+visible window announces itself anyway. `Q` closes everything, and the quit
+summary marks headed lanes so a forgotten window on a VNC desktop is stated
+rather than discovered.
+
+### 14.3 CDP port allocation — decided
+
+**Derive from the MCP port with a configurable offset, default 10000**, so lane
+4603 debugs on 14603. One allocator, one range to reason about, and the mapping
+is legible in `ps` output. 14601-14608 sits well below Linux's ephemeral range
+(32768-60999), so it cannot collide with an outbound socket. The derived port is
+still probed before use.
+
+**It binds `127.0.0.1` explicitly.** An open CDP endpoint is unauthenticated
+total control of the browser — arbitrary navigation, cookie theft, code
+execution in page context. `--remote-debugging-address=127.0.0.1` is not
+optional, even on a trusted network.
+
+### 14.4 Does adoption verify the tab — decided, yes
+
+Cheaply, over plain HTTP before Playwright is involved: `GET /json/list` on the
+CDP port returns every target with its URL. A lane is adopted only when a
+`page` target's URL carries the expected `file-id`. That is one request, needs
+no client library, and rejects the realistic accident — some other Chromium
+happening to hold a port in our range.
+
+Stricter checks exist (`Browser.getBrowserCommandLine` exposes the
+`--user-data-dir`) and are not worth the session setup unless the URL check
+proves insufficient.
+
+### 14.5 Container-launched browsers — open, and currently blocked
+
+Verified working: a **host**-launched Chromium with `--remote-debugging-port`,
+adopted with `connectOverCDP`, re-adopted after detach, with `browser.close()`
+detaching rather than killing. That is the whole model, and it works.
+
+A **container**-launched Chromium does not come up yet: `chrome_crashpad_handler:
+--database is required`, because Playwright normally supplies crash-handler
+flags that a bare `docker run` does not. Solvable, but the obvious fix — run
+Playwright inside the container to do the launching — puts a node process back
+in there and with it the question of whether the image can run TypeScript.
+Deferred: v1 launches browsers on the host, where version pinning is the only
+thing lost, and `--browser container` returns once the flag set is worked out.
+
+### 14.6 `--mode builtin` against cloud — still undriven
+
+If it works, the worker reduces to a browser and a URL and `topology.ts` gets
+simpler. Worth resolving before that module is written rather than after.
+
+### 14.7 One account, many documents — open
+
+Invariant 8 wants one profile per document, but the profile holds the session,
+so N documents means N logins of the same account. It works; whether a shared
+cookie jar with per-document profiles is better is unexplored.
