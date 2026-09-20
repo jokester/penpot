@@ -99,7 +99,7 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   exhausted range, and an odd-sized range where the last port has no partner.
   The out-of-range and busy errors name the free ports.
 
-- [ ] **T1.4 `core/topology.ts`.** `Mode` is the four-member union;
+- [x] **T1.4 `core/topology.ts`.** `Mode` is the four-member union;
   `wire(mode, account, ports, userToken)` returns the `Wiring` every URL comes
   from, and `isPluginSocket(url, wiring)` derives from the same value. —
   acceptance: tests assert `builtin` needs no server and matches `/mcp/ws`; that
@@ -247,6 +247,12 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   prose, API.md and IMPL-HANDOFF all say `exec/`. Fixed in T1.1.
 - 2026-09-20: **The plan lives here, not in `docs/`.** `docs/` is Penpot's
   Eleventy documentation site.
+- 2026-09-20: **`Wiring` also carries the server's environment.** SPEC §12
+  assigns invariant 9 — REPL suppression by aiming `PENPOT_MCP_REPL_PORT` at an
+  already-bound port — to `core/topology.ts`, and it belongs with the addresses
+  for the same reason they belong together: one function decides them, so they
+  cannot drift apart. `exec/` passes `wiring.serverEnv` through rather than
+  rebuilding it.
 - 2026-09-20: **`workspaceUrl` emits the legacy hash form, and
   `parseWorkspaceUrl` reads both.** Found in T1.2:
   `frontend/src/app/main/ui/routes.cljs` on `develop` has moved to
