@@ -180,7 +180,7 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
 
 ## Milestone 5 — The front end
 
-- [ ] **T5.1 `tui/render.ts`.** A pure function from `Screen` and a terminal
+- [x] **T5.1 `tui/render.ts`.** A pure function from `Screen` and a terminal
   size to a string. — acceptance: snapshot tests at 80×24 for an empty list, a
   mixed list of states, and a leftovers section; long document names truncate
   rather than wrap; no ANSI escape leaks into the snapshot's measured width.
