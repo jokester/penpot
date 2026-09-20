@@ -87,13 +87,23 @@ function clearHttpCache() {
     }
 }
 
+// Extra Chromium flags, space separated. Playwright forces software WebGL
+// (--use-angle=swiftshader-webgl), which Penpot's wasm renderer cannot use:
+// export_shape then fails with `WASM Error (wasm-critical)` from
+// _render_shape_pixels. Overriding the GL backend is the lever for that, e.g.
+//   PENPOT_BROWSER_ARGS="--use-gl=angle --use-angle=gl-egl --ignore-gpu-blocklist"
+// Reaching the real GPU additionally needs the invoking user in the `render`
+// group that owns /dev/dri/renderD128; without it ANGLE lands on llvmpipe,
+// which is still software.
+const EXTRA_ARGS = (process.env.PENPOT_BROWSER_ARGS ?? "").split(/\s+/).filter(Boolean);
+
 export async function openContext({ headless }) {
     if (CLEAR_CACHE) clearHttpCache();
 
     const ctx = await chromium.launchPersistentContext(PROFILE, {
         headless,
         ...(CHANNEL ? { channel: CHANNEL } : {}),
-        args: NO_THROTTLE_ARGS,
+        args: [...NO_THROTTLE_ARGS, ...EXTRA_ARGS],
         viewport: { width: 1440, height: 900 },
     });
 

@@ -503,6 +503,25 @@ database migrations run on start.
   The flag is set on `penpot-frontend` alone, so applying it recreates only that
   container — but a worker keeps the flags its page loaded with, so an already
   running worker needs a restart before it sees the change.
+- **…and even then, export_shape does not work from a worker yet.** With the
+  flag on, a human browser exports PNG fine, but the worker's Chromium fails at
+  `_render_shape_pixels` with `WASM Error (wasm-critical)`. Measured 2026-09-20:
+  the failure is identical headless and headed, for a 340x56 rectangle and a
+  1200x920 board, under both `--use-angle=swiftshader-webgl` (Playwright's
+  default) and `--use-angle=gl-egl` (Mesa llvmpipe). It is not
+  `SharedArrayBuffer` — no origin here sends COOP/COEP, so it is absent in the
+  human browser too, which exports successfully. WebGL2 is present in both.
+  What differs is that the human browser has hardware GL and the worker does
+  not: the host has an Intel GPU at `/dev/dri/renderD128`, owned by the `render`
+  group, and the worker's user is only in `video`. **Untested next step:**
+  `sudo usermod -aG render <user>`, re-login, then run the worker with
+  `PENPOT_BROWSER_ARGS="--use-gl=angle --use-angle=gl-egl
+  --ignore-gpu-blocklist"`. Until then use the SVG route below.
+- **Getting pixels or vectors out of a worker without export_shape.** Run
+  `penpot.generateMarkup([shape], {type:'svg'})` through `execute_code` and have
+  the plugin `fetch`-POST the result to a throwaway HTTP sink on the host. The
+  plugin sandbox can reach the host, so this also works for anything too large
+  to return through a tool call. Vector output, no exporter, no asset URL.
 - **`disable-login-with-password` on the public frontend is cosmetic.** It
   hides the form. The backend still accepts passwords, because the worker needs
   them. Cloudflare Access is the real gate.
