@@ -407,17 +407,31 @@ One screen, two regions.
 
 ## 8. Where it lives, and how it is built
 
-**`mcp/packages/headless/`, package `mcp-headless`, managed with npm.**
+**`mcp/packages/headless/`, package `@penpot/mcp-headless`, managed with pnpm.**
 
 This is part of our MCP kit, alongside `server` and `plugin`, and it is about
 the headless worker rather than about any deployment.
 `deploy/home-cluster/` is about the *stock containers* and is heading for k8s;
 the launcher must keep working across that move, so it cannot live there.
 
-It is **not** in `mcp/pnpm-workspace.yaml` — that lists `common`, `server` and
-`plugin` only. Staying out keeps Playwright out of the MCP server's lockfile,
-which is why `packages/host` was kept out too, and it is what makes npm and its
-`package-lock.json` unremarkable here.
+It is **not** a member of `mcp/pnpm-workspace.yaml` — that lists `common`,
+`server` and `plugin` only. Staying out keeps Playwright out of the MCP
+server's lockfile, which is why `packages/host` was kept out too. It does carry
+the repo-wide `packageManager` field, without which `corepack use` stamps an
+ancestor and this package never gets swept by a pnpm version update.
+
+An earlier draft of this section said npm and a `package-lock.json`. That was
+wrong twice over. The repo routes every dependency change through pnpm
+(`mem:workflow/updating-pnpm`), so npm would add a third package manager and a
+lockfile format that neither `scripts/clean-node-modules` nor the version sweep
+knows about. And a directory that is neither a workspace member nor a workspace
+root gets no lockfile at all: pnpm walks up, finds `mcp/pnpm-workspace.yaml`,
+installs *that* workspace's four projects, and skips this one in silence. So
+the package declares its own `pnpm-workspace.yaml`. That is what makes it a
+root, points it at the shared store, and turns a plain `pnpm install` here into
+the obvious thing. `packages/host` never did it, which is why its committed
+lockfile can only have come from an `--ignore-workspace` run that nothing
+records.
 
 Runtime: **TypeScript, run directly by Node, with no build step and no loader.**
 
@@ -546,13 +560,17 @@ mcp/packages/headless/
       launch.ts        launchPersistentContext, owned as a child (inv. 7)
       session.ts       cookie, login, profile                  (inv. 8)
       page.ts          open, readiness, reload                 (inv. 10)
-    docker/
-      compose.ts       exec, /proc probes, in-container pids    (inv. 5, 6)
+    exec/
+      backend.ts       the ExecBackend interface and its factory
+      procnet.ts       /proc/net/tcp and tcp6 parsing           (inv. 4)
+      compose.ts       docker compose exec, in-container pids   (inv. 5, 6)
     penpot/
       rpc.ts           login, teams, files, tokens
     tui/                list · form · fields · render
-  test/                 node:test, one file per core module
 ```
+
+Tests sit beside the code as `*.test.ts`, which is what `packages/server` and
+`packages/plugin` do. `node --test 'src/**/*.test.ts'` runs them.
 
 `core/`, `supervisor/lane.ts` and `exec/procnet.ts` are pure and fully tested.
 `browser/`, the `exec/` backends and `penpot/` are the I/O edges. `tui/` is a renderer over supervisor

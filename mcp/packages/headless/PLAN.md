@@ -56,10 +56,11 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
 - **Runtime**: TypeScript run directly by Node (v24.20.0 strips types natively).
   No build step, no `tsx`, no loader. Imports carry the `.ts` extension.
   `tsc --noEmit --strict` type-checks and never emits.
-- **Tests**: `node:test` + `node:assert/strict`, one file per module under
-  `test/`. There is no Makefile here; the commands are
-  `pnpm -C mcp/packages/headless run test`, `… run typecheck`,
-  `… run fmt:check`.
+- **Tests**: `node:test` + `node:assert/strict`, co-located as `src/**/*.test.ts`
+  the way `packages/server` and `packages/plugin` do it. There is no Makefile
+  here; the commands are `pnpm -C mcp/packages/headless run test` and
+  `… run types:check`. Formatting is the parent's:
+  `pnpm -C mcp run fmt` uses `mcp/.prettierrc`.
 - **Every task's tests run with no service, no secret and no network.** A
   worktree gets a fresh `pnpm install` and nothing copied from the main
   checkout. Live verification is a separate, explicitly marked step run from
@@ -75,11 +76,11 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
 
 ## Milestone 1 — Toolchain and pure core
 
-- [ ] **T1.1 Package skeleton.** `package.json`, `tsconfig.json`, `.gitignore`,
+- [x] **T1.1 Package skeleton.** `package.json`, `tsconfig.json`, `.gitignore`,
   `README.md`, the lockfile from a real install, and one trivial test so the
   runner is proven. Amend SPEC §8 (npm → standalone pnpm, with the reason) and
   SPEC §12's tree (`docker/` → `exec/`, which its own prose already says) in the
-  same commit. — acceptance: `pnpm -C mcp/packages/headless run typecheck` and
+  same commit. — acceptance: `pnpm -C mcp/packages/headless run types:check` and
   `… run test` both exit 0, and `git check-ignore` confirms `node_modules` is
   ignored while `pnpm-lock.yaml` is tracked.
 
@@ -212,16 +213,15 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
 
 ## Open questions
 
-- **Worktree install cost.** `mcp/pnpm-workspace.yaml` sets
-  `storeDir: ../.pnpm-store`, resolved against the workspace root — so a
-  worktree that is a sibling of the repo root gets its **own** store and a full
-  download per task. Measure in T1.1. If it hurts, point installs at the shared
-  store explicitly rather than copying anything between trees.
-- **Playwright's install script under pnpm.** `mcp/pnpm-workspace.yaml`'s
-  `allowBuilds` lists `esbuild` and `sharp` only, so the browser download may be
-  blocked with `ERR_PNPM_IGNORED_BUILDS`. Blocked is probably what we want — the
-  browsers are already in `~/.cache/ms-playwright` — but T1.1 must find out and
-  record the answer rather than leaving it to surprise a later task.
+- ~~**Worktree install cost.**~~ Answered in T1.1: a sibling worktree does get
+  its own store. Installing this package alone costs 5 packages and under a
+  second, because `allowBuilds` blocks the browser download and the browsers in
+  `~/.cache/ms-playwright` are shared. The 265 MB figure only appears if
+  something installs the whole `mcp` workspace, which nothing here needs to.
+- ~~**Playwright's install script under pnpm.**~~ Answered in T1.1: this
+  package's own `pnpm-workspace.yaml` sets `allowBuilds: playwright: false`, so
+  the download is skipped on purpose. A machine without the browsers runs
+  `pnpm exec playwright install chromium` once.
 - **`--check` output for scripting.** Whether leftovers need a `--json` form for
   systemd. Deferred; not in v1's acceptance.
 
@@ -247,6 +247,20 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   prose, API.md and IMPL-HANDOFF all say `exec/`. Fixed in T1.1.
 - 2026-09-20: **The plan lives here, not in `docs/`.** `docs/` is Penpot's
   Eleventy documentation site.
+- 2026-09-20: **The package declares its own `pnpm-workspace.yaml`.** Found in
+  T1.1: without one, pnpm walks up to `mcp/pnpm-workspace.yaml` and installs
+  that workspace's four projects, skipping this directory in silence — no
+  lockfile, no Playwright. Declaring a root is what makes a standalone lockfile
+  reachable by a plain `pnpm install`. This is not the nested-workspace hazard
+  `mem:workflow/updating-pnpm` warns about: that one is a workspace *member*
+  that also declares itself a root, and this package is a member of nothing.
+- 2026-09-20: **Tests sit beside the code**, not under `test/` as SPEC §12 drew
+  it. `packages/server` and `packages/plugin` both co-locate `src/*.test.ts`,
+  and matching the neighbours beats matching a diagram.
+- 2026-09-20: **`pnpm-lock.yaml` added to `mcp/.prettierignore`.** `pnpm -C mcp
+  run fmt` reformats everything under `packages/`, which today silently rewrites
+  `packages/host/pnpm-lock.yaml`. Generated files should not be a diff after
+  every install.
 - 2026-09-20: **Live verification is never a worktree task's gate.** A worktree
   gets no secrets and no copied config (`spawn-worktree` §0/§1), so e2e runs
   from the main checkout after a merge. Opt-in live tests are gated behind

@@ -1,0 +1,20 @@
+# This package is its own workspace root, deliberately.
+#
+# It keeps its own lockfile so Playwright stays out of mcp/pnpm-lock.yaml.
+# Without this file pnpm walks up, finds mcp/pnpm-workspace.yaml, and installs
+# *that* workspace instead -- this package is not one of its members, so it is
+# skipped in silence and no lockfile is ever written here. That is the state
+# mcp/packages/host is in: its committed lockfile can only have come from an
+# --ignore-workspace run, which nothing records and nobody repeats.
+#
+# Note this is NOT the nested-workspace hazard mem:workflow/updating-pnpm warns
+# about. That one is a *member* of a workspace that also declares itself a root,
+# which forks install behaviour for the same package. This package is a member
+# of nothing.
+storeDir: ../../../.pnpm-store
+
+# The browsers live in ~/.cache/ms-playwright and are shared by every checkout
+# and worktree, so there is nothing for the install script to do. A machine
+# without them runs `pnpm exec playwright install chromium` once.
+allowBuilds:
+    playwright: false

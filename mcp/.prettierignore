@@ -3,5 +3,8 @@
 python-scripts/
 .serena/
 
+# lockfiles are generated; reformatting them makes every install a diff
+pnpm-lock.yaml
+
 # auto-generated files
 mcp-server/data/api_types.yml
