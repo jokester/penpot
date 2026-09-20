@@ -40,6 +40,61 @@ resolves at runtime.
 
 Formatting comes from the parent: `pnpm -C .. run fmt` uses `mcp/.prettierrc`.
 
+## Configuration
+
+Two files, in `$XDG_CONFIG_HOME/mcp-headless` (so `~/.config/mcp-headless` by
+default). `--config DIR` points somewhere else; `MCP_HEADLESS_CONFIG` does the
+same from the environment.
+
+```
+~/.config/mcp-headless/
+  deployment.json         which container the MCP servers run in
+  accounts/<name>.env     one per worker account, mode 600
+```
+
+`deployment.json` selects and configures the exec backend. It is the only place
+that knows a container runtime exists, and leaving it out is not an error --
+without it `--mode exec` is unavailable and everything else still works.
+
+```json
+{
+  "backend": "compose",
+  "projectDir": "/path/to/deploy/home-cluster",
+  "service": "penpot-mcp",
+  "portRange": [4601, 4608]
+}
+```
+
+`projectDir` is resolved against the directory the file is in, so an absolute
+path is the safe spelling when configuration lives outside the repo.
+
+An account file is the shape `provision-worker` writes, unchanged, so the
+existing ones keep working:
+
+```sh
+PENPOT_ORIGIN="http://localhost:9001"
+PENPOT_EMAIL="worker@example.test"
+PENPOT_PASSWORD="…"
+PENPOT_FILE_URL="http://localhost:9001/#/workspace?team-id=…&file-id=…"
+PENPOT_MCP_URL="http://localhost:9001/mcp/stream?userToken=…"
+PENPOT_PROFILE_DIR="$HOME/.cache/penpot-headless/profile-worker"
+```
+
+Both ids in `PENPOT_FILE_URL` matter: they prefill the new-lane form. An empty
+`file-id` is tolerated -- an account provisioned without a scratch file has one
+-- but then nothing is prefilled and the ids have to be typed.
+
+**Symlink rather than copy.** An account file holds a password and a token, so
+it should exist once. Pointing at the one `provision-worker` already wrote
+keeps regeneration working and avoids a second copy going stale:
+
+```sh
+mkdir -p ~/.config/mcp-headless/accounts
+chmod 700 ~/.config/mcp-headless ~/.config/mcp-headless/accounts
+ln -s /path/to/deploy/home-cluster/worker/mcp-worker.env \
+      ~/.config/mcp-headless/accounts/mcp-worker.env
+```
+
 ## Dependencies
 
 This package keeps its own `pnpm-lock.yaml` and is **not** a member of
