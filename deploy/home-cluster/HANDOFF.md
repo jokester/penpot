@@ -1,5 +1,9 @@
 # Deploying Penpot on the home cluster
 
+> Moving this to Kubernetes? Read [DEPLOY-HANDOFF.md](DEPLOY-HANDOFF.md) first —
+> it lists what must survive the move, and three settings here look like
+> mistakes until you know why they exist.
+
 Everything needed to stand this up, for someone who has not seen the design
 discussion. Written 2026-09-18.
 
