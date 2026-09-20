@@ -36,9 +36,12 @@ See `spikes/README.md` for the evidence behind each design decision.
 
 ## Prerequisites
 
-- **Against cloud only:** Google Chrome installed (`channel: "chrome"`;
-  Playwright's headless shell gets challenged by Cloudflare). A self-hosted
-  instance has no such gate and uses the bundled Chromium.
+- ~~**Against cloud only:** Google Chrome installed.~~ **Not required, measured
+  2026-09-20:** Playwright's bundled Chromium loaded the cloud login page, the
+  authenticated dashboard and a workspace with no Cloudflare challenge, headless
+  and headed, across six runs — and drove a document end to end. The older
+  finding that the headless *shell* was challenged no longer holds for the
+  browser Playwright launches today.
 - MCP enabled in the Penpot account's settings. Without it the bundled plugin
   never starts and no WebSocket is attempted.
 - A logged-in profile: `pnpm run login` (once; the session lasts 7 days).

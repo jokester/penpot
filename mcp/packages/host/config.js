@@ -22,11 +22,14 @@ export const ORIGIN = (process.env.PENPOT_ORIGIN ?? "https://design.penpot.app")
 
 export const IS_LOOPBACK = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|$)/.test(ORIGIN);
 
-// Cloudflare fronts design.penpot.app and challenges Playwright's headless
-// shell, so the cloud path needs stock Chrome. A self-hosted instance has no
-// such gate, so the bundled Chromium is fine -- and does not require Chrome to
-// be installed at all. Set PENPOT_BROWSER_CHANNEL="" to force the bundled build.
-export const CHANNEL = process.env.PENPOT_BROWSER_CHANNEL ?? (IS_LOOPBACK ? "" : "chrome");
+// The bundled Chromium everywhere. This used to default to stock Chrome for
+// non-loopback origins, because Cloudflare challenged Playwright's headless
+// shell in front of design.penpot.app. Measured 2026-09-20, that no longer
+// holds: the bundled build loaded the cloud login page, the authenticated
+// dashboard and a workspace with no challenge, headless and headed, and drove a
+// document end to end. The old default actively broke cloud on a host without
+// Chrome installed. Set PENPOT_BROWSER_CHANNEL="chrome" to go back to it.
+export const CHANNEL = process.env.PENPOT_BROWSER_CHANNEL ?? "";
 
 // One profile per origin: the session cookie is origin-scoped, and mixing a
 // cloud and a local session in one profile directory only causes confusion.
