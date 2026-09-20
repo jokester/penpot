@@ -135,7 +135,7 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
 
 ## Milestone 3 — Supervision
 
-- [ ] **T3.1 `supervisor/lane.ts`.** `runLane` as a plain async function over
+- [x] **T3.1 `supervisor/lane.ts`.** `runLane` as a plain async function over
   nested `try`/`finally`, with fake `LaneDeps`. — acceptance: tests assert the
   event sequence to `connected`; that aborting runs **every** `finally` in
   reverse order of acquisition (assert the recorded order, not just that
@@ -247,6 +247,17 @@ Never kill a worker you did not start (IMPL-HANDOFF §2).
   prose, API.md and IMPL-HANDOFF all say `exec/`. Fixed in T1.1.
 - 2026-09-20: **The plan lives here, not in `docs/`.** `docs/` is Penpot's
   Eleventy documentation site.
+- 2026-09-20: **Readiness is a method on the `Lease`, not a free function
+  over a `Page`.** API.md put `waitForPluginSocket(page, wiring, …)` in
+  `browser/page.ts`. A lease already knows the wiring it was opened with, so
+  making it the one that answers means the question cannot be asked with
+  someone else's ports — invariant 11 made structural rather than remembered.
+  It also keeps Playwright's `Page` out of the lane entirely, so the state
+  machine is testable without faking a browser.
+- 2026-09-20: **`LaneDeps` carries no `PenpotApi`.** API.md listed one, but a
+  lane makes no RPC call: teams and files are fetched when the TUI builds the
+  form, long before a lane exists. `portRange` takes its place, since the lane
+  is what allocates.
 - 2026-09-20: **Reachability is an HTTP exchange, never a TCP connect.** The
   contract suite caught this against the live stack: Docker's proxy accepts a
   connection on every published port whether or not anything is behind it, so
