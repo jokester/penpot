@@ -40,7 +40,7 @@ class FakeSession implements BrowserSession {
         this.tabs += 1;
         this.injected.push(leaseInit.wiring.injectWsUri);
         return {
-            waitForPlugin: async () => "ws://localhost:4602/",
+            waitForPlugin: async () => ({ connected: true as const, url: "ws://localhost:4602/" }),
             close: async () => {
                 this.tabs -= 1;
             },

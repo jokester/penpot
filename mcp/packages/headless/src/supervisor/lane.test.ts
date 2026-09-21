@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import type { NotReady } from "../browser/page.ts";
 import type { BrowserKey, BrowserPool, Lease, LeaseInit } from "../browser/pool.ts";
 import type { AccountRef, DocumentRef } from "../core/target.ts";
 import type { ExecBackend, ExecResult, Exposure, RemoteProcess } from "../exec/backend.ts";
@@ -71,8 +72,8 @@ class TracingBackend implements ExecBackend {
 
 /** Knobs for the tab a lane gets. */
 interface PoolOptions {
-    /** What `waitForPlugin` resolves with. null models a timeout. */
-    readonly socket?: string | null;
+    /** Why the plugin is not ready, when a test wants it not to be. */
+    readonly notReady?: NotReady;
     /** Makes leasing throw, as a browser that will not start would. */
     readonly failLease?: string;
 }
@@ -100,7 +101,9 @@ class FakePool implements BrowserPool {
 
         return {
             waitForPlugin: async () =>
-                this.#options.socket ?? (this.#options.socket === null ? null : "ws://localhost:4602/"),
+                this.#options.notReady === undefined
+                    ? { connected: true as const, url: "ws://localhost:4602/" }
+                    : { connected: false as const, reason: this.#options.notReady },
             close: async () => {
                 this.leases -= 1;
                 this.#trace.note("unlease");
@@ -198,13 +201,26 @@ test("a cancelled lane is not a failed one", async () => {
 });
 
 test("a plugin that never dials fails the lane and still cleans up", async () => {
-    const h = harness({}, { socket: null });
+    const h = harness({}, { notReady: "timeout" });
     await h.run();
 
     const failed = h.events.find((e) => e.state === "failed");
     assert.ok(failed?.reason.includes("did not dial"), failed?.reason ?? "no failure was reported");
     assert.deepEqual(h.trace.steps, ["start:4601", "expose:4601", "lease", "unlease", "unexpose", "kill"]);
     assert.deepEqual(h.backend.inner.running, []);
+});
+
+test("a dropped socket is reported as a drop, not as silence", async () => {
+    // The two want different next steps, which is why the watch tells them
+    // apart: nothing dialled points at the session or the injected URI, while
+    // a socket that closed points at the server on the other end of it.
+    const h = harness({}, { notReady: "dropped" });
+    await h.run();
+
+    const failed = h.events.find((e) => e.state === "failed");
+    assert.ok(failed?.reason.includes("closed again"), failed?.reason ?? "no failure was reported");
+    assert.ok(failed?.reason.includes("ws://localhost:4602"), failed?.reason ?? "");
+    assert.deepEqual(h.trace.steps, ["start:4601", "expose:4601", "lease", "unlease", "unexpose", "kill"]);
 });
 
 test("a browser that will not open still kills the server", async () => {

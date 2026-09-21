@@ -7,6 +7,7 @@
 
 import type { AccountRef } from "../core/target.ts";
 import type { Wiring } from "../core/topology.ts";
+import type { PluginReadiness } from "./page.ts";
 
 /**
  * What a browser cannot vary between its tabs.
@@ -52,13 +53,13 @@ export interface LeaseInit {
  */
 export interface Lease {
     /**
-     * Resolves with the plugin socket's URL once the tab dials it, or null on timeout.
+     * Resolves once the tab's plugin has dialled and stayed, or says why not.
      *
      * The only trustworthy readiness signal there is (invariant 10): the URL,
      * an RPC probe and a response listener all report success for a tab that
-     * never connected.
+     * never connected. Opening is not enough either -- see `browser/page.ts`.
      */
-    waitForPlugin(timeoutMs: number, signal: AbortSignal): Promise<string | null>;
+    waitForPlugin(timeoutMs: number, signal: AbortSignal): Promise<PluginReadiness>;
     /** Closes the tab. The browser goes when its last lease does. */
     close(): Promise<void>;
 }

@@ -20,7 +20,10 @@ const doc = (n: number): DocumentRef => ({
 class CountingPool implements BrowserPool {
     closed = 0;
     async lease(_key: BrowserKey, _init: LeaseInit, _signal: AbortSignal): Promise<Lease> {
-        return { waitForPlugin: async () => "ws://localhost:4602/", close: async () => undefined };
+        return {
+            waitForPlugin: async () => ({ connected: true as const, url: "ws://localhost:4602/" }),
+            close: async () => undefined,
+        };
     }
     async closeAll(): Promise<void> {
         this.closed += 1;

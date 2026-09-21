@@ -49,6 +49,8 @@ export interface LaunchOptions {
      * untouched -- only the cache directories go.
      */
     readonly clearCache?: boolean;
+    /** Overrides how long a plugin socket must stay open to count. */
+    readonly settleMs?: number;
 }
 
 /**
@@ -88,16 +90,18 @@ export function playwrightLaunch(options: LaunchOptions = {}): Launch {
             await context.grantPermissions(["local-network-access"], { origin: init.account.origin });
         }
 
-        return new PlaywrightSession(context);
+        return new PlaywrightSession(context, options.settleMs);
     };
 }
 
 /** One persistent context, handing out tabs. */
 class PlaywrightSession implements BrowserSession {
     readonly #context: BrowserContext;
+    readonly #settleMs: number | undefined;
 
-    constructor(context: BrowserContext) {
+    constructor(context: BrowserContext, settleMs?: number) {
         this.#context = context;
+        this.#settleMs = settleMs;
     }
 
     async openTab(init: LeaseInit, signal: AbortSignal): Promise<Lease> {
@@ -116,7 +120,9 @@ class PlaywrightSession implements BrowserSession {
             }
 
             // Before goto: the plugin dials during load.
-            const watch = watchPluginSocket(page, init.wiring);
+            const watch = watchPluginSocket(page, init.wiring, {
+                ...(this.#settleMs === undefined ? {} : { settleMs: this.#settleMs }),
+            });
             await page.goto(init.url, { waitUntil: "domcontentloaded", timeout: GOTO_TIMEOUT_MS });
 
             return {

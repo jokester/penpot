@@ -260,7 +260,7 @@ Design: [FACADE.md](FACADE.md). One endpoint for every document, with the
 document chosen through the protocol instead of through a port number. Nothing
 here changes upstream code or runs non-stock code in the container.
 
-- [ ] **T8.1 Make readiness mean connected.** `PluginWatch` tracks `dropped` and
+- [x] **T8.1 Make readiness mean connected.** `PluginWatch` tracks `dropped` and
   nothing reads it, so a socket that opens and immediately closes satisfies
   `waitForPlugin`. Under the TUI that is a wrong row; under the façade, which
   opens lanes with nobody watching, it is a failed tool call blaming the wrong

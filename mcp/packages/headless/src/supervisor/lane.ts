@@ -17,6 +17,7 @@ import { workspaceUrl, type AccountRef, type DocumentRef } from "../core/target.
 import { wire, type Mode } from "../core/topology.ts";
 import type { ExecBackend } from "../exec/backend.ts";
 import type { BrowserPool } from "../browser/pool.ts";
+import type { NotReady } from "../browser/page.ts";
 
 /** How long to wait for the plugin to dial before calling the lane failed. */
 const CONNECT_TIMEOUT_MS = 90_000;
@@ -141,10 +142,11 @@ async function open(
             );
             try {
                 onEvent({ state: "opening", detail: "waiting for the plugin to connect" });
-                const socket = await lease.waitForPlugin(deps.connectTimeoutMs ?? CONNECT_TIMEOUT_MS, signal);
-                if (socket === null) {
-                    fail("unreachable", `the plugin did not dial ${wiring.injectWsUri} in time`, {
+                const readiness = await lease.waitForPlugin(deps.connectTimeoutMs ?? CONNECT_TIMEOUT_MS, signal);
+                if (!readiness.connected) {
+                    fail("unreachable", reasonFor(readiness.reason, wiring.injectWsUri), {
                         expected: wiring.injectWsUri ?? "the instance's own socket",
+                        reason: readiness.reason,
                     });
                 }
 
@@ -180,6 +182,27 @@ async function choosePorts(spec: LaneSpec, deps: LaneDeps, backend: ExecBackend)
 function until(signal: AbortSignal): Promise<void> {
     if (signal.aborted) return Promise.resolve();
     return new Promise((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+}
+
+/**
+ * What to tell an operator when the plugin never became ready.
+ *
+ * The two failures want different next steps, which is the whole reason the
+ * watch distinguishes them: nothing dialled at all points at the session, the
+ * MCP setting or the injected URI, while a socket that opened and closed again
+ * points at the server on the other end of it.
+ */
+function reasonFor(reason: NotReady, injected: string | null): string {
+    const where = injected ?? "the instance's own socket";
+
+    if (reason === "dropped") {
+        return (
+            `the plugin dialled ${where} and the socket closed again; ` +
+            `the server on that port refused it, or the page reloaded under it`
+        );
+    }
+    if (reason === "cancelled") return `gave up waiting for the plugin on ${where}`;
+    return `the plugin did not dial ${where} in time`;
 }
 
 /** A message for a person, whether the throw was a refusal or a bug. */
