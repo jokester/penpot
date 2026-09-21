@@ -254,6 +254,59 @@ Raised 2026-09-21 after the first proper look at the interface.
   lane starts only from the `start` row; `enter` on a lane opens a details view;
   the footer says only what is true.
 
+## Milestone 8 — The MCP façade
+
+Design: [FACADE.md](FACADE.md). One endpoint for every document, with the
+document chosen through the protocol instead of through a port number. Nothing
+here changes upstream code or runs non-stock code in the container.
+
+- [ ] **T8.1 Make readiness mean connected.** `PluginWatch` tracks `dropped` and
+  nothing reads it, so a socket that opens and immediately closes satisfies
+  `waitForPlugin`. Under the TUI that is a wrong row; under the façade, which
+  opens lanes with nobody watching, it is a failed tool call blaming the wrong
+  thing. Settle briefly after the socket opens and re-check before reporting.
+  **This blocks T8.3 and T8.4.** — acceptance: against a fake `Page`, a socket
+  that opens and closes within the settle window resolves `null` with a reason
+  naming the drop; one that opens and stays resolves its URL; one that closes
+  *after* the settle still reports connected, since that is the lane's own
+  business; aborting mid-settle rejects promptly rather than at the deadline.
+
+- [ ] **T8.2 Widen the published port range.** `4601-4608` is four lanes, which
+  is too few once the façade allocates one per session and document. — 
+  acceptance: `core/ports.ts` allocates twenty pairs from `4601-4640` and
+  refuses the twenty-first naming the range; `.env.example`,
+  `deploy/home-cluster/HANDOFF.md` and the `deployment.json` example in
+  `README.md` all agree on the new bound. *(Recreating `penpot-mcp` to publish
+  it is human-verified, from the main checkout.)*
+
+- [ ] **T8.3 `facade/leases.ts` — lanes as a resource, and the tab lock.**
+  Resolves a document to a lane, holds a lease per `(session, document)`,
+  releases on disconnect, session close or idle, and serialises calls per lane.
+  The lock is per tab, not per document, and is required even for one agent:
+  `plugin.ts:68` dispatches without awaiting, so two concurrent calls from one
+  client interleave in one JS context (FACADE.md §6). — acceptance: with fake
+  lanes, two sessions on one document get their own lanes by default and share
+  one under the flag; a shared lane runs one call at a time in FIFO order and
+  reports the queue depth; a call that never returns is timed out and releases
+  the lock rather than wedging the next caller; a lease outlives one of two
+  sessions and the lane goes with the last; an idle lease is collected.
+
+- [ ] **T8.4 `facade/server.ts` — the MCP endpoint.** Stateful, matching
+  Penpot's own choice, with `document` as an optional override on every tool so
+  a lost session is recoverable (FACADE.md §3). Mirrors the backend's tools by
+  acting as an MCP client to a lane. — acceptance: against a fake backend,
+  `list_documents` returns team and file names; `connect_doc` binds the session
+  and does not return until the lane is connected; a tool call with no
+  `document` uses the session's and one with `document` overrides it; an unknown
+  document is refused naming the known ones; a closed session releases its
+  lease; nothing calls `process.exit`.
+
+- [ ] **T8.5 Live acceptance.** *(human-verified, from the main checkout.)* One
+  static endpoint in the agent's configuration; `list_documents` shows real
+  names; `connect_doc` on a cold document blocks and then works; two documents
+  driven concurrently through the one endpoint; two sessions on one document do
+  not interleave; quitting the launcher leaves the container at baseline.
+
 ## Open questions
 
 - **Two lanes, one plugin connection.** *(blocks T6.3.)* With two lanes in one
@@ -274,6 +327,10 @@ Raised 2026-09-21 after the first proper look at the interface.
      tested with one account — one profile directory holds one Chromium — so
      answering it needs either a second worker account or a per-lane browser
      flavour.
+- **The supervisor refuses a second lane on one document** —
+  `lane ${id} already drives that document`. Right for hand-driven lanes, wrong
+  once the façade allocates them per session (FACADE.md §9). T8.3 has to make it
+  opt-out.
 - **Nothing non-interactive reaps.** `--check` reports leftovers and the TUI's
   `r` clears them, but a script has no way to. A `--reap` flag is the obvious
   addition.
