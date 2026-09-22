@@ -271,10 +271,11 @@ here changes upstream code or runs non-stock code in the container.
   *after* the settle still reports connected, since that is the lane's own
   business; aborting mid-settle rejects promptly rather than at the deadline.
 
-- [ ] **T8.2 Widen the published port range.** `4601-4608` is four lanes, which
-  is too few once the façade allocates one per session and document. — 
-  acceptance: `core/ports.ts` allocates twenty pairs from `4601-4640` and
-  refuses the twenty-first naming the range; `.env.example`,
+- [x] **T8.2 Widen the published port range.** `4601-4608` is four lanes, which
+  is too few once the façade allocates one per session and document. Widened to
+  `4601-4616`, eight lanes, **not** the twenty first proposed — see the Decision
+  log. — acceptance: `core/ports.ts` allocates eight pairs from `4601-4616` and
+  refuses the ninth naming the range; `docker-compose.yaml`,
   `deploy/home-cluster/HANDOFF.md` and the `deployment.json` example in
   `README.md` all agree on the new bound. *(Recreating `penpot-mcp` to publish
   it is human-verified, from the main checkout.)*
@@ -382,6 +383,11 @@ here changes upstream code or runs non-stock code in the container.
   a loose password beside an `AccountRef`, which allows pairing a password with
   the wrong email and makes every caller handle a secret. The account file
   already carries both.
+- 2026-09-23: **The port range goes to `4601-4616`, not `4601-4640`.** Measured
+  before doing it: Docker runs one `docker-proxy` process per published port,
+  ~6.9 MB each. Twenty lanes would have cost ~276 MB of idle proxy for capacity
+  nobody will use; eight lanes costs ~110 MB. Widening further is one line and a
+  recreate, whenever it is actually wanted.
 - 2026-09-20: **The supervisor allocates ports, not the lane.** Reversed after
   the first two-lane run: both lanes probed the container before either had
   started a server, and both took 4601. Choosing a port is a read followed by a

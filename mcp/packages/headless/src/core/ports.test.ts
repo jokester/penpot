@@ -108,3 +108,24 @@ test("a chosen pair need not be adjacent, only reachable and free", () => {
 test("describeRange is what the messages and the TUI both print", () => {
     assert.equal(describeRange(RANGE), "4601-4608");
 });
+
+test("the published range holds eight lanes, and says so when it is full", () => {
+    // Eight, not twenty: Docker runs one docker-proxy per published port at
+    // about 6.9 MB, so the range is sized to what will be used rather than to
+    // what might be (PLAN.md, decision log 2026-09-23).
+    const published: PortRange = { lo: 4601, hi: 4616 };
+    const taken: number[] = [];
+
+    for (let lane = 0; lane < 8; lane += 1) {
+        const pair = allocate(published, taken);
+        assert.deepEqual(pair, { http: 4601 + lane * 2, ws: 4602 + lane * 2 }, `lane ${lane}`);
+        taken.push(pair.http, pair.ws);
+    }
+
+    refuses(() => allocate(published, taken), "range-exhausted", { range: "4601-4616", free: "none" });
+});
+
+test("a port the old range never reached is now usable", () => {
+    assert.equal(assertUsable({ http: 4615, ws: 4616 }, { lo: 4601, hi: 4616 }, []), undefined);
+    refuses(() => assertUsable({ http: 4615, ws: 4616 }, { lo: 4601, hi: 4608 }, []), "port-out-of-range");
+});

@@ -46,7 +46,8 @@ Costs, measured on this host:
 | stock MCP server process | **46 MB** RSS (`/proc/<pid>/status` inside the container) |
 | browser + first tab | 527 MB |
 | each further tab | 94 MB |
-| published port range | `4601-4608` → **four lanes** |
+| published port range | `4601-4616` → **eight lanes** |
+| each published port | **6.9 MB** — Docker runs one `docker-proxy` per port |
 
 ## 3. The protocol, accurately
 
@@ -219,8 +220,18 @@ What would force non-stock code, so the boundary is known:
   It has to become opt-out.
 - **Idle timeout.** A tab is 94 MB and a server 46 MB. Penpot sweeps sessions at
   60 minutes; that is generous for a lane. 5–10 minutes is probably right.
-- **Port range.** `4601-4608` allows four lanes. Per-session allocation wants
-  more; `4601-4640` gives twenty for one line of compose and a recreate.
+- ~~**Port range.**~~ Settled at `4601-4616`, eight lanes. Twenty was the first
+  proposal and the measurement killed it: Docker runs one `docker-proxy` per
+  published port at about 6.9 MB, so forty ports would cost roughly 276 MB of
+  idle proxy for capacity that will not be used. Eight lanes costs about
+  110 MB. Widening further is one line and a recreate whenever it is wanted.
+
+  A deployment that wanted many more lanes should set `userland-proxy: false`
+  in the Docker daemon first, which replaces the per-port process with iptables
+  DNAT. That is a daemon-wide change and not this package's business -- but note
+  it would also make a connection to an unoccupied published port fail rather
+  than succeed, which is the lie section 2 records `expose` having to work
+  around.
 
 ## 10. What must land first
 

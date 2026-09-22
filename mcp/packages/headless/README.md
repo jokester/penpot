@@ -83,7 +83,7 @@ without it `--mode exec` is unavailable and everything else still works.
   "backend": "compose",
   "projectDir": "/path/to/deploy/home-cluster",
   "service": "penpot-mcp",
-  "portRange": [4601, 4608]
+  "portRange": [4601, 4616]
 }
 ```
 

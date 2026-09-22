@@ -317,7 +317,7 @@ Three server modes:
 so the two can never be version-skewed, it needs no build and no extra image,
 and single-user mode takes no token at all — your MCP client just connects to
 `http://127.0.0.1:<port>/mcp`. Ports come from the range the compose file
-publishes (`PENPOT_DOC_PORT_MIN`..`MAX`, default 4601-4608) and are picked
+publishes (`PENPOT_DOC_PORT_MIN`..`MAX`, default 4601-4616) and are picked
 automatically.
 
 **Let it pick them.** A `--port` outside that range starts a server that works
