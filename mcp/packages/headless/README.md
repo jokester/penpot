@@ -90,6 +90,18 @@ without it `--mode exec` is unavailable and everything else still works.
 `projectDir` is resolved against the directory the file is in, so an absolute
 path is the safe spelling when configuration lives outside the repo.
 
+**`portRange` must match what the deployment actually publishes.** It is
+declared twice — here, and in the compose file's published range — and the two
+are not checked against each other. A lane asked for a port outside the
+published range is refused up front:
+
+> HTTP port 4615 is outside the published range 4601-4608, so nothing on this
+> host could reach it
+
+That refusal is the design working: a server started outside the range runs
+perfectly and nothing can reach it (invariant 3). After widening the compose
+range, widen this too and recreate `penpot-mcp`.
+
 `tui.json` chooses the columns and their order. `--columns port,client` does
 the same for one run and wins over the file. The columns are `port`, `state`,
 `document`, `team`, `account`, `browser`, `display`, `mode`, `uptime` and
