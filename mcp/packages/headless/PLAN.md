@@ -297,15 +297,27 @@ here changes upstream code or runs non-stock code in the container.
   next; exhausting the lanes evicts idle ones first and then refuses, naming
   what holds the rest.
 
-- [ ] **T8.4 `facade/server.ts` — the MCP endpoint.** Stateful, matching
-  Penpot's own choice, with `document` as an optional override on every tool so
-  a lost session is recoverable (FACADE.md §3). Mirrors the backend's tools by
-  acting as an MCP client to a lane. — acceptance: against a fake backend,
-  `list_documents` returns team and file names; `connect_doc` binds the session
-  and does not return until the lane is connected; a tool call with no
-  `document` uses the session's and one with `document` overrides it; an unknown
-  document is refused naming the known ones; a closed session releases its
-  lease; nothing calls `process.exit`.
+- [x] **T8.4a `facade/facade.ts` — what the façade does.** Every rule, with no
+  transport attached, for the same reason `render` is a pure function: the part
+  that can be wrong should be testable without standing a server up. The tool
+  set is hard-coded — three document-scoped and two static, taken from a live
+  single-user lane — because no lane exists before the first `connect_doc` and
+  there is nothing to mirror from at startup. — acceptance: against a fake
+  backend, `list_documents` returns team and file names; `connect_doc` binds the
+  session and reports anyone else in the file; a call with no `document` uses
+  the session's and one with `document` switches to it; an unknown or ambiguous
+  document is refused naming the candidates; a closed session releases its
+  lease; static tools open no lane.
+
+- [ ] **T8.4b `facade/server.ts` — the transport shell.** The SDK wiring: a
+  stateful Streamable HTTP server matching Penpot's own choice, an SDK client as
+  the `Backend`, `$HOST`/`$PORT` honoured with `127.0.0.1:4400` as the default,
+  the bind address logged because an exported `HOST` would widen it silently,
+  and `extra.sessionId` threaded into the lease. Always serves; `--no-serve`
+  turns it off. — acceptance: argv and environment precedence is table-tested
+  (`--host`/`--port` over `$HOST`/`$PORT` over the default); `main` still calls
+  `process.exit` nowhere; the lane source is bound to the supervisor and the
+  static endpoint to the account's own origin and token.
 
 - [ ] **T8.5 Live acceptance.** *(human-verified, from the main checkout.)* One
   static endpoint in the agent's configuration; `list_documents` shows real
@@ -388,6 +400,14 @@ here changes upstream code or runs non-stock code in the container.
   a loose password beside an `AccountRef`, which allows pairing a password with
   the wrong email and makes every caller handle a secret. The account file
   already carries both.
+- 2026-09-23: **The façade's tool set is hard-coded, not mirrored.** There is no
+  lane before the first `connect_doc`, so at startup there is nothing to mirror
+  from. Taken from a live single-user lane: `execute_code`, `export_shape` and
+  `import_image` need a document; `high_level_overview` and `penpot_api_info` do
+  not, and answer with no plugin connected — which matters because the server's
+  instructions tell an agent to read the overview first. Multi-user drops
+  `import_image`, so the list had to come from a lane rather than from the
+  instance's own endpoint. T8.5 asserts it still matches.
 - 2026-09-23: **One lane per document, never shared, and the earlier advice to
   relax the supervisor's refusal is withdrawn.** Two clients on one lane share
   `storage`, which the server's own system prompt tells the agent to use
