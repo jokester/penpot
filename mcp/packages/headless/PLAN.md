@@ -354,6 +354,33 @@ down, or deliberately dropped first.
   `--reset-password` and `--invite` carry over; re-provisioning an existing
   account is refused unless asked, because the password only lives in the file.
 
+## Milestone 10 — Kubernetes, and one file to describe it
+
+The compose containers belong to another service now, so `exec` lanes need
+the `kubectl` backend SPEC section 5 has specified from the start. Evaluated
+against `~/Homelab/home-cluster/ns-penpot`, never against compose.
+
+- [x] **T10.1 The `kubectl` ExecBackend.** Pod by label every call; `env K=V`
+      because exec has no `-e`; `-i` only when there is stdin; `expose` honours
+      `exposure: none | port-forward`. — verified by the shared contract suite
+      against the live cluster.
+- [x] **T10.2 `upstreamPortRange`.** A constant offset between the ports the
+      host reaches and the ports the container binds. `wire()` takes both, and
+      using either where the other belongs gives a server nothing can reach or
+      a readiness check on a socket that never opens.
+- [x] **T10.3 `conf.yaml`.** One hand-written file: instance, worker pool,
+      façade address, backend, browser. No secrets, unknown keys refused.
+- [x] **T10.4 The worker pool.** One lane, one worker. Capacity is whichever of
+      ports and workers runs out first; the façade opens a lane with a worker
+      that can see the document.
+- [x] **T10.5 Provision the pool.** `provision-worker-user` with no `--email`
+      creates every worker the file names that has no account file yet.
+- [ ] **T10.6 Exposure under `none`, on the node.** Everything here was driven
+      from off-node, so `port-forward` is the path with live evidence behind it
+      and `none` has only the contract suite. Running the launcher on `rarity`
+      would exercise the hostPorts the namespace actually provides. — acceptance:
+      the same end-to-end run with `exposure: none` and no forwards.
+
 ## Open questions
 
 - **Two lanes, one plugin connection.** *(blocks T6.3.)* With two lanes in one
@@ -429,6 +456,26 @@ down, or deliberately dropped first.
   a loose password beside an `AccountRef`, which allows pairing a password with
   the wrong email and makes every caller handle a secret. The account file
   already carries both.
+- 2026-09-24: **`conf.yaml` refuses unknown keys.** A hand-written file's
+  worst failure is a mistyped key that reads as present and changes nothing.
+  The cost is that a file naming something we removed stops working, which is
+  the point: `penpotBackend` is refused by name rather than ignored.
+- 2026-09-24: **The worker pool is one worker per lane.** Not for the lock --
+  the per-document lease already settles that -- but because two agents
+  editing adjacent documents as the same Penpot user see each other's presence
+  and selections. Capacity is now `min(port pairs, workers)`, and the two
+  refusals stay distinct because they are fixed differently.
+- 2026-09-24: **A Secure session cookie is re-stored without the flag on
+  loopback http, and nowhere else.** Penpot sets `Secure` under
+  `enable-secure-session-cookies`, correct for its public https origin and
+  fatal for a `http://127.0.0.1` worker path -- Playwright accepts the cookie
+  and then never sends it. Narrowed to loopback, where `Secure` protects
+  against nothing, rather than turning the deployment flag off.
+- 2026-09-24: **Sessions are established for the whole pool at startup, not
+  lazily.** It costs a browser launch per worker before the endpoint opens,
+  and it buys a pool that is the workers which actually work rather than the
+  ones that were listed -- a worker that cannot sign in is reported by name
+  instead of becoming a lane that times out ninety seconds later.
 - 2026-09-23: **`ExecBackend.run` names a container by role, not by service.**
   Provisioning needs `manage.py`, which lives in the backend image and not the
   MCP one. A role keeps compose's service and kubectl's selector behind the

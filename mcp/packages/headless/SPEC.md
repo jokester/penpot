@@ -219,6 +219,16 @@ which satisfies invariant 7 by construction rather than by careful arrangement,
 and nothing needs exposing for the browser at all. It costs headed mode, which
 wants a display the pod does not have.
 
+**Both halves of a lane are exposed together.** `expose` takes the pair, not a
+port: the agent connects to the HTTP port and the browser dials the WebSocket,
+and a lane with only the first forwarded opens, answers, and never becomes
+ready.
+
+**A local range need not be the container's.** `upstreamPortRange` maps one
+onto the other by a constant offset, for the case where the range you want is
+taken on the host running the launcher. Measured: an unrelated Docker stack
+held 127.0.0.1:4601-4616 on this host, accepted connections and reset them.
+
 Invariant 3 is therefore backend-specific and belongs to the backend, not to
 `core/ports.ts`: the rule is *the agent must be able to reach the lane's MCP
 port*, and each backend says how.
@@ -502,8 +512,16 @@ everything after.
 
 Three layers, most specific wins:
 
-1. **Deployment** — `deployment.json`, which selects and configures the exec
-   backend and is the only place that knows a container runtime exists:
+0. **The deployment as a whole** — `conf.yaml`, which describes the instance,
+   the worker pool, the façade's address, the exec backend and the browser in
+   one file a person writes by hand. No secrets live in it: a worker's password
+   and MCP token stay in `accounts/<name>.env`. Unknown keys are refused rather
+   than ignored. Where it and `deployment.json` speak about the same thing, the
+   YAML wins; flags beat the file, and the file beats `$HOST` and `$PORT`,
+   because an environment variable is ambient and the file was written for this
+   deployment on purpose.
+1. **Deployment** — `deployment.json`, the older spelling of `conf.yaml`'s
+   `mcpBackend` alone, still read so an existing configuration keeps working:
 
    ```json
    { "backend": "compose", "projectDir": "../../deploy/home-cluster",

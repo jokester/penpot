@@ -93,10 +93,19 @@ through an identity provider, and a headless browser cannot. Keeping worker
 accounts separate from human ones is what bounds the reach of a leaked worker
 credential.
 
+**One lane takes one worker**, so the pool is a ceiling on concurrent documents
+alongside the port range. Separate identities are the point: two agents editing
+adjacent documents as the same Penpot user see each other's presence and
+selections, which reads as the application misbehaving.
+
 ```sh
+pnpm start -- provision-worker-user          # every worker conf.yaml names
 pnpm start -- provision-worker-user --email worker-a@penpot.local \
     --invite 'https://penpot.example/#/auth/verify-token?token=...'
 ```
+
+With no `--email` it creates every worker the file names that has no account
+file yet, which is how you add the fourth worker to a pool of three.
 
 That creates the profile, accepts the invitations, turns MCP on, mints the
 token, makes a scratch document, and writes
@@ -126,13 +135,50 @@ has no mailbox to confirm from.
 
 ## Configuration
 
+One file describes the deployment: `conf.yaml`, next to the accounts. The
+template is [conf.template.yaml](conf.template.yaml), which is tested for
+parsing so it cannot rot.
+
+```yaml
+penpot:
+    url: http://127.0.0.1:9001
+
+workerUsers:
+    - name: worker-a
+      email: worker-a@penpot.local
+
+mcpFacade: { host: 127.0.0.1, port: 4600 }
+
+mcpBackend:
+    type: kubectl # or: docker-compose
+    hostname: 127.0.0.1
+    portRange: 4601-4608
+    exposure: none
+    kubectl: { namespace: penpot, selector: app=penpot-mcp }
+```
+
+Two rules give it its shape:
+
+- **No secrets.** A worker's password and MCP token live in
+  `accounts/<name>.env`, mode 600, written by provisioning and never by a
+  person. The YAML names workers; it does not hold what they know.
+- **Unknown keys are refused.** A mistyped key that reads as present and
+  changes nothing is the worst way a hand-written file fails.
+
+`deployment.json` is the older spelling of `mcpBackend` alone and still works;
+where both speak, the YAML wins. Flags beat the file, the file beats `$HOST`
+and `$PORT`.
+
+### Two files, or three
+
 Two files, in `$XDG_CONFIG_HOME/mcp-headless` (so `~/.config/mcp-headless` by
 default). `--config DIR` points somewhere else; `MCP_HEADLESS_CONFIG` does the
 same from the environment.
 
 ```
 ~/.config/mcp-headless/
-  deployment.json         which container the MCP servers run in
+  conf.yaml               the deployment, the workers, the addresses
+  deployment.json         the older spelling of mcpBackend alone
   tui.json                optional: what the lane list shows
   accounts/<name>.env     one per worker account, mode 600
 ```
@@ -152,10 +198,37 @@ without it `--mode exec` is unavailable and everything else still works.
 
 `projectDir` is resolved against the directory the file is in, so an absolute
 path is the safe spelling when configuration lives outside the repo.
+
+Under Kubernetes the equivalent is `kubectl`, and it names a **label**, never a
+pod: a pod's name changes on every restart.
+
+```json
+{
+  "backend": "kubectl", "namespace": "penpot",
+  "selector": "app=penpot-mcp", "exposure": "none",
+  "portRange": [4601, 4608]
+}
+```
+
+`exposure` is the only real choice there. `none` means the ports are already
+node-local — a `hostPort` or a node-local Service — and there is nothing to
+own; it is right whenever the launcher runs on the node beside the pod.
+`port-forward` is for a launcher outside the cluster with no other route in,
+and it costs a `kubectl port-forward` child per lane.
+
+**Both of a lane's ports are forwarded, not just one.** The agent connects to
+the HTTP port and the browser dials the WebSocket; forwarding only the first
+gives a lane that opens, answers, and never becomes ready.
+
+`upstreamPortRange` publishes the container's ports somewhere else. Omit it
+unless the range you want is taken on the host running the launcher — which
+does happen, and cost a live debugging session: an unrelated Docker stack held
+127.0.0.1:4601-4616, accepted the connection and reset it.
 `adminService` names the container `manage.py` lives in and defaults to
 `penpot-backend`; only `provision-worker-user` asks for it.
 
-**`portRange` must match what the deployment actually publishes.** It is
+**`portRange` must match what the deployment actually publishes**, unless
+`upstreamPortRange` says how they differ. It is
 declared twice — here, and in the compose file's published range — and the two
 are not checked against each other. A lane asked for a port outside the
 published range is refused up front:

@@ -161,7 +161,7 @@ export interface ExecBackend {
         signal: AbortSignal): Promise<RemoteProcess>;
   kill(pid: number): Promise<void>;
   listening(): Promise<number[]>;
-  expose(port: number, signal: AbortSignal): Promise<Exposure>;
+  expose(ports: PortPair, signal: AbortSignal): Promise<Exposure>;
 }
 
 export function backendFor(d: Deployment): ExecBackend;
@@ -187,6 +187,44 @@ list and the container's show argv to anything that can look, so a password
 passed as a flag is a password published. `manage.py` prompts for one when
 `-p` is absent and, with no terminal, `getpass` reads it from stdin instead --
 confirmed against the running instance rather than assumed.
+
+**`expose` takes a lane's pair, not a port.** The agent connects to the HTTP
+port and the browser dials the WebSocket, and they are reached by different
+things. Under compose and under hostPorts both are published together and
+`expose` only verifies; under `kubectl` with `exposure: "port-forward"` both
+need forwarding, and forwarding only the HTTP one gives a lane that opens,
+answers, and never becomes ready.
+
+### `exec/kubectl.ts`
+
+**The pod is resolved by label on every call.** A pod's name changes on every
+restart, so a name cached at startup stops existing the first time the
+deployment rolls. It is remembered only for the lifetime of a process we
+started — sending a kill to the *current* pod would be sending a pid number
+that now means something else.
+
+**`kubectl exec` has no `-e`,** so a started process is wrapped in `env K=V`.
+That puts the values on the container's argv, which is why `start` has always
+documented that it must not carry secrets. `run`'s `stdin` adds `-i`, and only
+when there is something to send: without it a command that reads until EOF
+waits for one that never comes.
+
+**The forward waits for the pod to bind before it is spawned.** `kubectl
+port-forward` dials the target inside the pod's network namespace as soon as it
+starts, and a refusal kills it rather than being retried — `error: lost
+connection to pod`. `start` resolves when the wrapper shell prints its pid,
+which is before node has bound anything, so without the wait the forward is
+always spawned into that window.
+
+**It passes `--address`.** Without it kubectl binds both loopback families and
+is satisfied if *either* succeeds, so on a host where something already holds
+127.0.0.1 it binds `[::1]` alone, prints "Forwarding from" and looks healthy.
+Measured: docker-proxy from an unrelated stack held 4601 and the forward came
+up anyway.
+
+**What the forward said is kept and reported.** A forward that comes up and
+then dies leaves a lane waiting on a port nothing is behind, and without this
+the only thing anyone could say about it was "nothing answers".
 
 ### `exec/procnet.ts`
 
@@ -278,6 +316,23 @@ list on the host, and accepting it silently would leave them thinking otherwise.
 
 ---
 
+## `core/conf.ts` — the one file an operator writes
+
+```ts
+export function parseConf(text: string, file?: string): Conf;
+```
+
+**No secrets, and unknown keys are refused.** The first makes the file safe to
+commit; the second is because a hand-written file's worst failure is a mistyped
+key that reads as present and changes nothing. Every refusal names the path it
+was at — `mcpBackend.kubectl.namespace`, not "the namespace" — because the
+reader is looking at a file and needs to know which line to change.
+
+`deploymentOf` maps its backend block onto the `Deployment` the rest of the
+launcher already understands, so nothing downstream knows the YAML exists.
+
+---
+
 ## `browser/` — Playwright lives behind this and nowhere else
 
 ### `browser/pool.ts`
@@ -323,6 +378,18 @@ export interface SessionStore {
 Two logins because SSO and 2FA accounts cannot be scripted. `loginInteractive`
 waits for the cookie to exist rather than for the window to close — the window
 closing proves nothing.
+
+**`cookies()` is unfiltered, and a Secure cookie is re-stored on loopback.**
+Playwright will not return a `Secure` cookie for an `http://` URL — loopback
+included — and will not send one either. Penpot sets `Secure` whenever the
+deployment runs with `enable-secure-session-cookies`, which is right for its
+public https origin and leaves the worker path unable to hold a session at all:
+measured, `get-profile` came back with no email. So the store matches the
+cookie's host itself, and re-stores it without the flag when the origin is
+`http` on a loopback host — the one case where `Secure` protects against
+nothing, and the same reasoning browsers use to call loopback "potentially
+trustworthy". For any other host the cookie is left exactly as the server set
+it.
 
 ### `browser/page.ts`
 
