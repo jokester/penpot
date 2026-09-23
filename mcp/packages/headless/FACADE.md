@@ -101,20 +101,24 @@ couplings where there are currently none.
 ## 5. The design
 
 ```
-agent A ─┐                                        ┌─ lane :4603 ─ tab (diagrams)
-         ├─ mcp-headless :4400                    │
-agent B ─┘   connect_doc · list_documents         ├─ lane :4605 ─ tab (diagrams)
-             session → lane lease                 └─ lane :4607 ─ tab (viewer)
-                                                     one browser, one account
+agent A ──┐                                       ┌─ lane :4603 ─ tab (diagrams)
+          ├─ mcp-headless :4400                   │
+agent B ──┤    connect_doc · list_documents       └─ lane :4605 ─ tab (viewer)
+          │    document → one lane, one holder
+agent C ──┘    ("diagrams" is taken → refused)       one browser, one account
 ```
 
 The agent's configuration becomes one static URL, permanently. Lanes and ports
 become an implementation detail the façade allocates.
 
+A document has **one** lane and that lane has **one** holder. A third agent
+asking for a document already held is refused, naming the holder -- the
+allocation policy of sections 6b and 6c, not a lock.
+
 ```
 list_documents()                → team / name, from the token's own REST access
 connect_doc(document)           → binds this session; opens a lane; blocks until ready
-disconnect_doc()                → releases the lease
+disconnect_doc()                → releases the lease and wipes the scratchpad
 execute_code(code, document?)   → the optional override of section 3
 ```
 
@@ -125,9 +129,11 @@ argument so clients autocomplete real names, `ResourceTemplate("penpot://{team}/
 so documents appear in a resource picker, and `sendToolListChanged` when the set
 moves.
 
-A lease is held per `(session, document)`. It is released by `disconnect_doc`, by
-the transport's `onclose`, or by an idle timeout — whichever comes first. The
-lane goes when its last lease does.
+A lease is held per document, by one session. It is released by
+`disconnect_doc`, by the transport's `onclose`, or by an idle timeout —
+whichever comes first. On release the lane's `storage` is wiped (§6b) and the
+lane is kept warm for the next holder until the idle timeout collects it, so a
+handover costs nothing while a cold start costs ten to twenty seconds.
 
 **Cold start blocks the caller.** `connect_doc` on a new document takes 10–20 s.
 An agent that gets a fast success and then a slow first call reads the second as
@@ -154,6 +160,81 @@ an access path, not on a document, and naming it otherwise promises what it
 cannot deliver. A real one would need a lease the backend issues and every
 client honours; Penpot has no such concept, and building one would fight a
 product whose entire design is concurrent editing without locks.
+
+**What is both possible and necessary is an allocation policy.** Refusing to
+hand out a second lane for a document the façade has already leased is not a
+lock and claims nothing about anyone else -- it declines to create the one
+collision we control. Sections 6b and 6c are why that matters more than it first
+appeared.
+
+## 6b. One lane per document, and why sharing one is not an option
+
+Two clients on one lane share more than a schedule. `ExecuteCodeTaskHandler`
+builds one context per tab -- `taskHandlers` is module scope, so one instance
+per plugin -- and that context is:
+
+```js
+this.context = { penpot, storage: {}, console: new ExecuteCodeTaskConsole(), penpotUtils };
+```
+
+- **`storage` is shared working memory, and the agent is told to lean on it.**
+  From the server's own system prompt (`data/initial_instructions.md:16`): "You
+  use the `storage` object extensively to store data and utility functions you
+  define across tool calls." Two clients on one lane overwrite each other's
+  scratchpad. **The tab lock does not help**: persistence across calls is the
+  point of `storage`, not a side effect of it.
+- **The console buffer is shared and reset per call.** `handle()` opens with
+  `console.resetLog()`, so one call wipes another's log and carries the wrong
+  output back.
+- **`penpot.flags` save and restore is not reentrant.** Each call stores the
+  *current* value as its "original": A saves false and sets true, B saves true
+  and sets true, A restores false while B is still running, B restores true. The
+  flag ends up stuck on, and B ran part of its code under the wrong semantics.
+
+The last two are concurrency, and the tab lock fixes them. The first is
+isolation and nothing fixes it. So a lane is **never shared between clients**.
+
+Sequential reuse is a different matter, and is safe once the scratchpad is
+cleared -- which the escape hatch already reaches, because `storage` is in scope
+of the generated function:
+
+```js
+for (const key of Object.keys(storage)) delete storage[key];
+```
+
+Wiping on release lets a lane pass from one client to the next without the ten
+to twenty second cold start, and without either seeing the other's state.
+
+## 6c. Two agents on one document, even in separate lanes
+
+Separate lanes remove the shared scratchpad. They do not make concurrent editing
+safe, and the reason is sharper than "two editors disagree".
+
+From `mem:frontend/plugin-api-to-cljs-binding`: "Public Plugin API objects are
+lightweight handles, not durable snapshots. Most getters locate fresh state from
+`app.main.store/state`." And: "`not-valid` logs by default but throws when the
+plugin flag `throwValidationErrors` is enabled. The MCP execute-code handler
+deliberately enables that flag while running code."
+
+So for two agents on one document:
+
+- **Values stay fresh; reasoning goes stale.** A handle re-reads current state,
+  so an agent never sees a stale number. What is stale is its *plan* -- formed
+  from a read at one moment, executed against a document rewritten since. That
+  is invisible to the agent and invisible to us.
+- **Deletes become non-deterministic throws.** A handle to a shape the other
+  agent removed resolves to nothing and, because MCP turns on
+  `throwValidationErrors`, throws mid-sequence. Loud rather than silent, which
+  is the one piece of luck here.
+- **Lost updates are silent.** Both read, modify and write the same property;
+  the last writer wins and neither is told.
+
+None of that is touched by separate lanes, separate accounts, a tab lock or a
+wiped `storage`. Hence the allocation policy: **one lane per document, and a
+second session asking for a held one is refused, naming the holder.** Not
+overridable per call -- an agent must not be able to evict another agent. A
+deployment that genuinely wants two sets a launcher flag, which is a person's
+decision rather than an agent's.
 
 ## 7. Contention, which we cannot fix
 
@@ -210,16 +291,19 @@ What would force non-stock code, so the boundary is known:
 
 ## 9. Open decisions
 
-- **Isolation default.** One lane per `(session, document)` costs 94 MB and
-  needs no lock between agents. Sharing a lane costs nothing and needs the tab
-  lock to serialise them. Proposed: **own lane by default, share on a flag**,
-  with sharing as the degradation path once the lane ceiling is reached.
-- **Relaxing an existing refusal.** `LaneSupervisor` currently refuses a second
-  lane on one document — `lane ${id} already drives that document`. That was
-  right for hand-driven lanes and becomes wrong when the façade allocates them.
-  It has to become opt-out.
-- **Idle timeout.** A tab is 94 MB and a server 46 MB. Penpot sweeps sessions at
-  60 minutes; that is generous for a lane. 5–10 minutes is probably right.
+- ~~**Isolation default.**~~ Settled: **one lane per document**, never shared
+  between clients, and a second session asking for a held one is refused.
+  Sections 6b and 6c are the reasons. An earlier draft proposed sharing as a
+  degradation path, and that was wrong twice over.
+- ~~**Relaxing an existing refusal.**~~ Reversed. `LaneSupervisor` refuses a
+  second lane on one document — `lane ${id} already drives that document` — and
+  an earlier draft called that "right for hand-driven lanes and wrong once the
+  façade allocates them". The rule was right, for a better reason than it was
+  given: two agents on one document is hazardous in itself (§6c). It stays, and
+  the façade enforces the same thing at `connect_doc`.
+- **Idle timeout.** A tab is 94 MB and a server 46 MB, and an idle lease now also
+  keeps another agent off the document. Penpot sweeps its own sessions at 60
+  minutes, which is far too generous for that. Proposed: **10 minutes**.
 - ~~**Port range.**~~ Settled at `4601-4616`, eight lanes. Twenty was the first
   proposal and the measurement killed it: Docker runs one `docker-proxy` per
   published port at about 6.9 MB, so forty ports would cost roughly 276 MB of

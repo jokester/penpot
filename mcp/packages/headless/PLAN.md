@@ -280,17 +280,22 @@ here changes upstream code or runs non-stock code in the container.
   `README.md` all agree on the new bound. *(Recreating `penpot-mcp` to publish
   it is human-verified, from the main checkout.)*
 
-- [ ] **T8.3 `facade/leases.ts` — lanes as a resource, and the tab lock.**
-  Resolves a document to a lane, holds a lease per `(session, document)`,
-  releases on disconnect, session close or idle, and serialises calls per lane.
-  The lock is per tab, not per document, and is required even for one agent:
-  `plugin.ts:68` dispatches without awaiting, so two concurrent calls from one
-  client interleave in one JS context (FACADE.md §6). — acceptance: with fake
-  lanes, two sessions on one document get their own lanes by default and share
-  one under the flag; a shared lane runs one call at a time in FIFO order and
-  reports the queue depth; a call that never returns is timed out and releases
-  the lock rather than wedging the next caller; a lease outlives one of two
-  sessions and the lane goes with the last; an idle lease is collected.
+- [ ] **T8.3 `facade/leases.ts` — one lane per document, and the tab lock.**
+  Resolves a document to its lane, leases it to exactly one session, refuses a
+  second holder, wipes `storage` on release, keeps the lane warm until an idle
+  timeout collects it, and serialises calls per lane. Two rules, for two
+  different reasons: the **lease** is because two agents on one document is
+  hazardous in itself (FACADE.md §6c), and the **lock** is because one client
+  issuing parallel calls already interleaves in one JS context, since
+  `plugin.ts:68` dispatches without awaiting (§6b). — acceptance: with fake
+  lanes, a second session asking for a held document is refused naming the
+  holder and cannot override it per call; releasing wipes the scratchpad before
+  the next holder sees the lane; a released lane is reused without a cold start
+  and collected after the idle timeout; two concurrent calls from one session
+  run one at a time in FIFO order and the second reports its queue depth; a call
+  that never returns is timed out and releases the lock rather than wedging the
+  next; exhausting the lanes evicts idle ones first and then refuses, naming
+  what holds the rest.
 
 - [ ] **T8.4 `facade/server.ts` — the MCP endpoint.** Stateful, matching
   Penpot's own choice, with `document` as an optional override on every tool so
@@ -383,6 +388,16 @@ here changes upstream code or runs non-stock code in the container.
   a loose password beside an `AccountRef`, which allows pairing a password with
   the wrong email and makes every caller handle a secret. The account file
   already carries both.
+- 2026-09-23: **One lane per document, never shared, and the earlier advice to
+  relax the supervisor's refusal is withdrawn.** Two clients on one lane share
+  `storage`, which the server's own system prompt tells the agent to use
+  "extensively... across tool calls", so sharing is a cross-client channel and
+  not merely a scheduling problem. And two agents on one document are unsafe
+  even in separate lanes: plugin objects are live handles, so values stay fresh
+  while the agent's *plan* goes stale, and a handle to a shape the other agent
+  deleted throws because MCP enables `throwValidationErrors`. The refusal
+  `lane ${id} already drives that document` was right all along. See FACADE.md
+  §6b and §6c.
 - 2026-09-23: **The port range goes to `4601-4616`, not `4601-4640`.** Measured
   before doing it: Docker runs one `docker-proxy` process per published port,
   ~6.9 MB each. Twenty lanes would have cost ~276 MB of idle proxy for capacity

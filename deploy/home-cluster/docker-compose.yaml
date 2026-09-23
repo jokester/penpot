@@ -178,9 +178,15 @@ services:
       # routable: `docker compose exec penpot-mcp curl 127.0.0.1:4403/`.
       PENPOT_MCP_REPL_PORT: "4401"
     # A port range for per-document servers started with `docker compose exec`
-    # inside this container (see run-mcp-worker --mcp exec). Publishing the
-    # range costs nothing while unused, and exec'd servers inherit the image's
+    # inside this container. exec'd servers inherit the image's
     # PENPOT_MCP_SERVER_HOST=0.0.0.0, so they are reachable on these.
+    #
+    # Publishing is NOT free, contrary to what this comment used to claim.
+    # Docker runs one docker-proxy process per published port, measured at
+    # ~6.9 MB resident whether or not anything is behind it -- so this range
+    # costs ~110 MB standing. Two ports per lane, hence eight lanes. Widen it
+    # when eight documents under simultaneous agent control is the constraint,
+    # and know what each port costs.
     ports:
       - "${PENPOT_DOC_BIND:-127.0.0.1}:${PENPOT_DOC_PORT_MIN:-4601}-${PENPOT_DOC_PORT_MAX:-4616}:${PENPOT_DOC_PORT_MIN:-4601}-${PENPOT_DOC_PORT_MAX:-4616}"
 
