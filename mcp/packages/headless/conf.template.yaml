@@ -1,0 +1,21 @@
+workerUsers:
+  - username: TODO
+    email: TODO@penpot.io
+    password: TODO
+
+mcpFacade:
+  host: 0.0.0.0
+  port: 4600
+
+mcpBackend:
+  type: docker-compose # or: kubectl
+  hostname: 127.0.0.1 # must be accessible from browser and the MCP facade
+  portRange: 4601-4700
+  upstreamPortRange: 4601-4700 # optional, if mcp server container's port is mapped to portRange. must be as long as portRange
+
+penpotBackend:
+  hostname: localhost
+  port: 6063
+
+browserBackend:
+  type: local
