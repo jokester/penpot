@@ -6,6 +6,7 @@
 // the systemd unit is a single command.
 
 import { parseColumns, type ColumnName } from "./core/columns.ts";
+import { parseListen, type Address } from "./facade/address.ts";
 import { fail } from "./core/errors.ts";
 import type { Mode } from "./core/topology.ts";
 
@@ -31,6 +32,10 @@ export interface Options {
     readonly yes: boolean;
     /** Overrides the list's columns for this run. */
     readonly columns?: readonly ColumnName[];
+    /** Whether to open the MCP endpoint. On unless --no-serve. */
+    readonly serve: boolean;
+    /** Overrides where that endpoint listens. */
+    readonly listen?: Partial<Address>;
 }
 
 const MODES: readonly Mode[] = ["builtin", "exec", "local", "image"];
@@ -54,6 +59,10 @@ name more than one; each --account starts a new lane.
   --headed            show the browser. Needs DISPLAY
   --display :N        the X display for --headed
 
+  --listen ADDR       where the MCP endpoint listens: 4400, :4400 or
+                      127.0.0.1:4400. Overrides $HOST and $PORT; the default
+                      is 127.0.0.1:4400
+  --no-serve          do not open the MCP endpoint at all
   --config DIR        where deployment.json, tui.json and accounts/ live
   --columns a,b,c     which columns the list shows, in order. Overrides
                       tui.json. See --columns help for the names
@@ -72,6 +81,8 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = {}):
     let configDir = env.MCP_HEADLESS_CONFIG ?? defaultConfigDir(env);
     let yes = false;
     let columns: readonly ColumnName[] | undefined;
+    let serve = true;
+    let listen: Partial<Address> | undefined;
 
     const lanes: LaneRequest[] = [];
     /** The lane being filled in. A new --account starts the next one. */
@@ -98,9 +109,9 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = {}):
         switch (arg) {
             case "--help":
             case "-h":
-                return { command: "help", configDir, lanes: [], yes };
+                return { command: "help", configDir, lanes: [], yes, serve };
             case "--version":
-                return { command: "version", configDir, lanes: [], yes };
+                return { command: "version", configDir, lanes: [], yes, serve };
             case "--no-tui":
                 command = "no-tui";
                 break;
@@ -117,6 +128,13 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = {}):
             case "--columns":
                 columns = parseColumns(valueOf(arg, index));
                 index += 1;
+                break;
+            case "--listen":
+                listen = parseListen(valueOf(arg, index));
+                index += 1;
+                break;
+            case "--no-serve":
+                serve = false;
                 break;
             case "--account":
                 finish();
@@ -162,7 +180,15 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = {}):
         }
     }
 
-    return { command, configDir, lanes, yes, ...(columns === undefined ? {} : { columns }) };
+    return {
+        command,
+        configDir,
+        lanes,
+        yes,
+        serve,
+        ...(columns === undefined ? {} : { columns }),
+        ...(listen === undefined ? {} : { listen }),
+    };
 }
 
 /** Adds a field to the lane being built, or says which flag came too early. */

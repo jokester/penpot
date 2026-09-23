@@ -117,3 +117,23 @@ test("--columns overrides the file, and refuses a name that does not exist", () 
     refuses(["--columns", "pid"], "there is no pid column");
     refuses(["--columns"], "--columns needs a value");
 });
+
+test("--listen and --no-serve reach the options", () => {
+    assert.equal(parseArgs([], ENV).serve, true, "the endpoint is open unless it is turned off");
+    assert.equal(parseArgs(["--no-serve"], ENV).serve, false);
+
+    assert.deepEqual(parseArgs(["--listen", "4500"], ENV).listen, { port: 4500 });
+    assert.deepEqual(parseArgs(["--listen", "0.0.0.0:4500"], ENV).listen, { host: "0.0.0.0", port: 4500 });
+    assert.equal(parseArgs([], ENV).listen, undefined, "no flag means the environment or the default decides");
+});
+
+test("--listen refuses an address that is not one", () => {
+    refuses(["--listen", "nope"], "is not a port number");
+    refuses(["--listen"], "--listen needs a value");
+});
+
+test("--port still belongs to a lane, not to the endpoint", () => {
+    // Two meanings for one flag would be a trap; the endpoint uses --listen.
+    refuses(["--port", "4400"], "--port must follow an --account");
+    assert.equal(parseArgs([...lane("--port", "4601")], ENV).lanes[0]?.port, 4601);
+});

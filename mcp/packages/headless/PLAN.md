@@ -309,7 +309,7 @@ here changes upstream code or runs non-stock code in the container.
   document is refused naming the candidates; a closed session releases its
   lease; static tools open no lane.
 
-- [ ] **T8.4b `facade/server.ts` — the transport shell.** The SDK wiring: a
+- [x] **T8.4b `facade/server.ts` — the transport shell.** The SDK wiring: a
   stateful Streamable HTTP server matching Penpot's own choice, an SDK client as
   the `Backend`, `$HOST`/`$PORT` honoured with `127.0.0.1:4400` as the default,
   the bind address logged because an exported `HOST` would widen it silently,
@@ -400,6 +400,17 @@ here changes upstream code or runs non-stock code in the container.
   a loose password beside an `AccountRef`, which allows pairing a password with
   the wrong email and makes every caller handle a secret. The account file
   already carries both.
+- 2026-09-23: **The endpoint uses `--listen`, not `--port`.** `--port` already
+  belongs to a lane group and must follow an `--account`; two meanings for one
+  flag would be a trap. `$HOST` and `$PORT` are read bare as asked, with
+  `127.0.0.1:4400` as the default and the bind address logged — zsh keeps a
+  `HOST` parameter set to the hostname and does not export it, but anything
+  that did would move the façade off loopback silently.
+- 2026-09-23: **Signals are registered once, in `main`, and both front ends
+  honour the same one.** Found by the first TUI run that actually held lanes:
+  `--no-tui` handled SIGINT and SIGTERM and the TUI handled neither, so a
+  signal killed the process before any cleanup and left three servers in the
+  container. Total ownership undone by a signal nobody had thought about.
 - 2026-09-23: **The façade's tool set is hard-coded, not mirrored.** There is no
   lane before the first `connect_doc`, so at startup there is nothing to mirror
   from. Taken from a live single-user lane: `execute_code`, `export_shape` and

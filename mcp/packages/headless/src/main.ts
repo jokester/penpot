@@ -15,8 +15,15 @@ import { flavourOf, playwrightLaunch, playwrightSessions } from "./browser/launc
 import { LeasingPool } from "./browser/pool.ts";
 import { ensureSession, sessionStore } from "./browser/session.ts";
 import { backendFor, type ExecBackend } from "./exec/backend.ts";
+import { facadeAddress } from "./facade/address.ts";
+import { SdkBackend } from "./facade/backend.ts";
+import { Facade } from "./facade/facade.ts";
+import { laneCapacity, supervisorLanes } from "./facade/lanes.ts";
+import { LeaseRegistry } from "./facade/leases.ts";
+import { serveFacade, type Serving } from "./facade/server.ts";
 import { catalogue } from "./penpot/catalogue.ts";
 import { penpotApi } from "./penpot/rpc.ts";
+import { normalizeOrigin } from "./core/target.ts";
 import type { LaneDeps, LaneSpec } from "./supervisor/lane.ts";
 import { describe as describeLeftover, scan } from "./supervisor/leftovers.ts";
 import { hostProcesses } from "./supervisor/host-processes.ts";
@@ -81,23 +88,93 @@ async function dispatch(options: Options, settings: Settings, env: NodeJS.Proces
         host: hostProcesses,
     });
 
-    if (options.command === "no-tui") {
-        return await headless(options, settings, supervisor, leftovers.length, io, env);
+    const serving = options.serve ? await serve(options, settings, supervisor, env, io) : null;
+
+    // One place registers the signals, and both front ends honour the same
+    // one. The TUI used to register none, so a SIGTERM killed the process
+    // before any cleanup ran and left its lanes in the container -- total
+    // ownership undone by a signal nobody had thought about.
+    const stopping = new AbortController();
+    const onSignal = () => stopping.abort();
+    for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, onSignal);
+
+    try {
+        if (options.command === "no-tui") {
+            return await headless(options, settings, supervisor, leftovers.length, io, env, stopping.signal);
+        }
+
+        return await runTui({
+            supervisor,
+            settings,
+            leftovers,
+            portRange,
+            input: io.input ?? process.stdin,
+            output: io.out,
+            yes: options.yes,
+            env,
+            // The flag wins over the file, which wins over the default.
+            tui: options.columns === undefined ? settings.tui : { ...settings.tui, columns: options.columns },
+            catalogue: catalogue(penpotApi()),
+            stopping: stopping.signal,
+        });
+    } finally {
+        for (const signal of ["SIGINT", "SIGTERM"] as const) process.removeListener(signal, onSignal);
+        await serving?.close();
+    }
+}
+
+/**
+ * Opens the MCP endpoint, so an agent's configuration is one static URL.
+ *
+ * Needs an account: the façade lists that account's documents and drives them.
+ * With none configured there is nothing to serve, which is worth saying rather
+ * than binding a port that can answer nothing.
+ */
+async function serve(
+    options: Options,
+    settings: Settings,
+    supervisor: LaneSupervisor,
+    env: NodeJS.ProcessEnv,
+    io: Io
+): Promise<Serving | null> {
+    const account = [...settings.accounts.values()][0];
+    if (account === undefined) {
+        io.err.write("no accounts configured, so the MCP endpoint is not opened; see --help\n");
+        return null;
+    }
+    if (account.mcpToken === undefined) {
+        io.err.write(`${account.name} has no MCP token, so the MCP endpoint is not opened\n`);
+        return null;
     }
 
-    return await runTui({
-        supervisor,
-        settings,
-        leftovers,
-        portRange,
-        input: io.input ?? process.stdin,
-        output: io.out,
-        yes: options.yes,
-        env,
-        // The flag wins over the file, which wins over the default.
-        tui: options.columns === undefined ? settings.tui : { ...settings.tui, columns: options.columns },
+    const portRange = settings.deployment?.portRange ?? { lo: 4601, hi: 4608 };
+    const backend = new SdkBackend();
+    const facade = new Facade({
+        leases: new LeaseRegistry(
+            supervisorLanes(supervisor, backend, { account, flavour: flavourOf(launchOptions(env)) }),
+            { capacity: laneCapacity(portRange) }
+        ),
+        backend,
         catalogue: catalogue(penpotApi()),
+        account,
+        // The instance's own endpoint answers the tools that need no document,
+        // so an agent's first call cannot fail for want of one.
+        staticEndpoint: `${normalizeOrigin(account.origin)}/mcp/stream?userToken=${encodeURIComponent(account.mcpToken)}`,
     });
+
+    const serving = await serveFacade({
+        facade,
+        address: facadeAddress(options.listen, env),
+        log: (line) => io.out.write(`${line}\n`),
+    });
+
+    return {
+        address: serving.address,
+        close: async () => {
+            await serving.close();
+            await backend.closeAll();
+        },
+    };
 }
 
 /** Reports wreckage from a previous run, and says nothing else. */
@@ -138,7 +215,8 @@ async function headless(
     supervisor: LaneSupervisor,
     leftovers: number,
     io: Io,
-    env: NodeJS.ProcessEnv
+    env: NodeJS.ProcessEnv,
+    stopping: AbortSignal
 ): Promise<number> {
     if (leftovers > 0) io.err.write(`warning: ${leftovers} leftover(s) from a previous run; try --check\n`);
     if (options.lanes.length === 0) {
@@ -173,7 +251,7 @@ async function headless(
         return 1;
     }
 
-    const code = await waitForStop(supervisor, io);
+    const code = await waitForStop(supervisor, io, stopping);
     const { forced } = await supervisor.shutdown(15_000);
     if (forced > 0) io.err.write(`${forced} lane(s) had to be forced\n`);
     return code;
@@ -190,15 +268,18 @@ async function headless(
  * Exiting non-zero once every lane has failed is the systemd shape: the unit
  * fails and gets restarted, rather than sitting up with nothing running.
  */
-function waitForStop(supervisor: LaneSupervisor, io: Io): Promise<number> {
+function waitForStop(supervisor: LaneSupervisor, io: Io, stopping: AbortSignal): Promise<number> {
     return new Promise<number>((resolve) => {
         const keepAlive = setInterval(() => undefined, 1 << 30);
 
         const finish = (code: number) => {
             clearInterval(keepAlive);
             unsubscribe();
+            stopping.removeEventListener("abort", onStop);
             resolve(code);
         };
+
+        const onStop = () => finish(0);
 
         const unsubscribe = supervisor.subscribe((records) => {
             if (records.length > 0 && records.every((record) => record.state === "failed")) {
@@ -207,9 +288,8 @@ function waitForStop(supervisor: LaneSupervisor, io: Io): Promise<number> {
             }
         });
 
-        for (const signal of ["SIGINT", "SIGTERM"] as const) {
-            process.once(signal, () => finish(0));
-        }
+        if (stopping.aborted) finish(0);
+        else stopping.addEventListener("abort", onStop, { once: true });
     });
 }
 

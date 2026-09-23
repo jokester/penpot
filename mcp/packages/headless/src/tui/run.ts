@@ -52,6 +52,8 @@ export interface TuiDeps {
     readonly tui: TuiSettings;
     /** Lists an account's documents by name. */
     readonly catalogue: Catalogue;
+    /** Aborted on SIGINT or SIGTERM, so a signal quits the same way `q` does. */
+    readonly stopping?: AbortSignal;
 }
 
 /**
@@ -274,6 +276,10 @@ export async function runTui(deps: TuiDeps): Promise<number> {
         input.pause();
         output.write(SHOW_CURSOR);
     };
+
+    // A signal quits exactly as `q` does, so the lanes are ended rather than
+    // abandoned in the container.
+    deps.stopping?.addEventListener("abort", () => void quit(), { once: true });
 
     emitKeypressEvents(input);
     if (input.isTTY) input.setRawMode(true);
