@@ -40,6 +40,30 @@ resolves at runtime.
 
 Formatting comes from the parent: `pnpm -C .. run fmt` uses `mcp/.prettierrc`.
 
+## Running it as a service
+
+`./serve` starts, stops and restarts the MCP endpoint in the background.
+
+```sh
+./serve start          # or restart, stop, status, logs
+./serve status
+./serve restart --listen 0.0.0.0:4500
+```
+
+The agent's configuration is then one static URL that never changes:
+
+```jsonc
+{ "penpot": { "url": "http://127.0.0.1:4400/mcp" } }
+```
+
+State lives in `$XDG_STATE_HOME/mcp-headless` (so `~/.local/state/mcp-headless`
+by default): a pid file and a log. Stopping sends `SIGTERM`, which runs the same
+shutdown as quitting the TUI — every lane ends and the container is left as it
+was found — so a restart with documents connected is safe.
+
+When stdout is not a terminal the launcher serves quietly and logs one line per
+lane transition, instead of drawing a screen nobody is looking at once a second.
+
 ## Using it
 
 `mcp-headless` opens the list. It holds every lane it starts and ends all of

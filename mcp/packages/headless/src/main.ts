@@ -103,6 +103,15 @@ async function dispatch(options: Options, settings: Settings, env: NodeJS.Proces
             return await headless(options, settings, supervisor, leftovers.length, io, env, stopping.signal);
         }
 
+        // Nobody is watching a screen that is not a terminal, and the TUI
+        // redraws once a second -- detached, that is a screenful per second
+        // into a log file. So when stdout is redirected the launcher serves
+        // quietly instead of drawing, which is what a background service wants
+        // and needs no flag to ask for.
+        if (!isTerminal(io.out)) {
+            return await serveQuietly(supervisor, serving, io, stopping.signal);
+        }
+
         return await runTui({
             supervisor,
             settings,
@@ -255,6 +264,55 @@ async function headless(
     const { forced } = await supervisor.shutdown(15_000);
     if (forced > 0) io.err.write(`${forced} lane(s) had to be forced\n`);
     return code;
+}
+
+/** True when the stream is a terminal someone could be looking at. */
+function isTerminal(out: NodeJS.WritableStream): boolean {
+    return (out as NodeJS.WriteStream).isTTY === true;
+}
+
+/**
+ * Serves the MCP endpoint and waits, logging what the lanes do.
+ *
+ * The shape a background service wants: no screen, one line per transition,
+ * and an exit only on a signal. Unlike `--no-tui` it needs no lanes named up
+ * front, because the agent asks for documents through the endpoint.
+ */
+async function serveQuietly(
+    supervisor: LaneSupervisor,
+    serving: Serving | null,
+    io: Io,
+    stopping: AbortSignal
+): Promise<number> {
+    if (serving === null) {
+        io.err.write("nothing to do: stdout is not a terminal and the MCP endpoint is not open\n");
+        return 2;
+    }
+
+    const seen = new Set<string>();
+    supervisor.subscribe((records) => {
+        for (const record of records) {
+            const document = record.spec.document.name ?? record.spec.document.fileId;
+            const line = `${document} ${record.state} ${record.clientUrl ?? record.error ?? ""}`.trimEnd();
+            if (seen.has(line)) continue;
+            seen.add(line);
+            io.out.write(`${line}\n`);
+        }
+    });
+
+    await new Promise<void>((resolve) => {
+        const keepAlive = setInterval(() => undefined, 1 << 30);
+        const finish = () => {
+            clearInterval(keepAlive);
+            resolve();
+        };
+        if (stopping.aborted) finish();
+        else stopping.addEventListener("abort", finish, { once: true });
+    });
+
+    const { forced } = await supervisor.shutdown(15_000);
+    if (forced > 0) io.err.write(`${forced} lane(s) had to be forced\n`);
+    return 0;
 }
 
 /**
