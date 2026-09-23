@@ -280,7 +280,7 @@ here changes upstream code or runs non-stock code in the container.
   `README.md` all agree on the new bound. *(Recreating `penpot-mcp` to publish
   it is human-verified, from the main checkout.)*
 
-- [ ] **T8.3 `facade/leases.ts` — one lane per document, and the tab lock.**
+- [x] **T8.3 `facade/leases.ts` — one lane per document, and the tab lock.**
   Resolves a document to its lane, leases it to exactly one session, refuses a
   second holder, wipes `storage` on release, keeps the lane warm until an idle
   timeout collects it, and serialises calls per lane. Two rules, for two
