@@ -6,7 +6,6 @@
 // rewrite.
 
 import type { Deployment } from "../core/config.ts";
-import { fail } from "../core/errors.ts";
 
 /** What a short command left behind. */
 export interface ExecResult {
@@ -97,7 +96,6 @@ export async function backendFor(deployment: Deployment): Promise<ExecBackend> {
         const { ComposeBackend } = await import("./compose.ts");
         return new ComposeBackend(deployment);
     }
-    fail("not-configured", `the ${deployment.backend} backend is not implemented yet (SPEC section 3b)`, {
-        backend: deployment.backend,
-    });
+    const { KubectlBackend } = await import("./kubectl.ts");
+    return new KubectlBackend(deployment);
 }

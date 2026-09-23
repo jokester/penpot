@@ -128,3 +128,41 @@ export function assertUsable(pair: PortPair, range: PortRange, busy: readonly nu
         }
     }
 }
+
+/**
+ * Translates between the ports the host reaches and the ports the container binds.
+ *
+ * A constant offset, because the two ranges are required to be the same length:
+ * anything else is a per-port table nobody would keep correct, and the case
+ * this exists for -- "the range I wanted is taken on this host" -- is a shift,
+ * not a permutation.
+ */
+export interface PortMap {
+    /** The in-container port behind a local one. */
+    upstream(local: number): number;
+    /** The local port that reaches an in-container one. */
+    local(upstream: number): number;
+}
+
+/** The identity map, for the deployments where the two ranges are the same. */
+export const IDENTITY_PORTS: PortMap = { upstream: (port) => port, local: (port) => port };
+
+/** Builds the map between a local range and the container range behind it. */
+export function portMap(local: PortRange, upstream?: PortRange): PortMap {
+    if (upstream === undefined) return IDENTITY_PORTS;
+
+    const localSpan = local.hi - local.lo;
+    const upstreamSpan = upstream.hi - upstream.lo;
+    if (localSpan !== upstreamSpan) {
+        fail(
+            "not-configured",
+            `the port ranges must be the same length: ${local.lo}-${local.hi} is ${localSpan + 1} ports, ` +
+                `${upstream.lo}-${upstream.hi} is ${upstreamSpan + 1}`,
+            { local: `${local.lo}-${local.hi}`, upstream: `${upstream.lo}-${upstream.hi}` }
+        );
+    }
+
+    const offset = upstream.lo - local.lo;
+    if (offset === 0) return IDENTITY_PORTS;
+    return { upstream: (port) => port + offset, local: (port) => port - offset };
+}

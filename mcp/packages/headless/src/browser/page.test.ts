@@ -5,13 +5,13 @@ import { EventEmitter } from "node:events";
 import type { Page } from "playwright";
 
 import type { AccountRef } from "../core/target.ts";
-import { wire } from "../core/topology.ts";
+import { samePorts, wire } from "../core/topology.ts";
 import { watchPluginSocket, type PluginReadiness } from "./page.ts";
 
 const ACCOUNT: AccountRef = { name: "mcp-worker", origin: "http://localhost:9001", profileDir: "/tmp/p" };
 
 /** The lane's wiring: injected on 4602, so only that port is the plugin's. */
-const WIRING = wire("exec", ACCOUNT, { http: 4601, ws: 4602 });
+const WIRING = wire("exec", ACCOUNT, samePorts({ http: 4601, ws: 4602 }));
 
 /** Settle short enough that the suite stays fast, long enough to be a window. */
 const SETTLE = 30;

@@ -5,12 +5,12 @@
 // the only spelling that works regardless of how the compose file is named.
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { request } from "node:http";
 import { resolve } from "node:path";
 
 import type { Deployment } from "../core/config.ts";
 import { fail } from "../core/errors.ts";
 import { parseListeningPorts } from "./procnet.ts";
+import { reachable, sleep } from "./reach.ts";
 import type { ExecBackend, ExecResult, Exposure, RemoteProcess, RunOptions } from "./backend.ts";
 
 /** How long to keep proving a freshly started port is reachable, by default. */
@@ -40,6 +40,7 @@ export class ComposeBackend implements ExecBackend {
     readonly #projectDir: string;
     readonly #service: string;
     readonly #adminService: string;
+    readonly #host: string;
     /** Exec clients by in-container pid, so killing a process also ends its client. */
     readonly #clients = new Map<number, ChildProcess>();
     readonly #logs = new Map<number, string[]>();
@@ -53,6 +54,7 @@ export class ComposeBackend implements ExecBackend {
         this.#projectDir = resolve(deployment.configDir, deployment.compose.projectDir);
         this.#service = deployment.compose.service;
         this.#adminService = deployment.compose.adminService ?? DEFAULT_ADMIN_SERVICE;
+        this.#host = deployment.host;
         this.#reachableTimeoutMs = options.reachableTimeoutMs ?? REACHABLE_TIMEOUT_MS;
     }
 
@@ -171,16 +173,16 @@ export class ComposeBackend implements ExecBackend {
 
         for (;;) {
             if (signal.aborted) fail("unreachable", `gave up waiting for port ${port}`, { port });
-            if (await reachable(port)) break;
+            if (await reachable(this.#host, port)) break;
             if (Date.now() > deadline) {
-                fail("unreachable", `nothing answers on 127.0.0.1:${port} after ${this.#reachableTimeoutMs} ms`, {
+                fail("unreachable", `nothing answers on ${this.#host}:${port} after ${this.#reachableTimeoutMs} ms`, {
                     port,
                 });
             }
             await sleep(250, signal);
         }
 
-        return { url: `http://127.0.0.1:${port}/mcp`, close: async () => undefined };
+        return { url: `http://${this.#host}:${port}/mcp`, close: async () => undefined };
     }
 
     #spawn(args: readonly string[], stdin: "ignore" | "pipe" = "ignore"): ChildProcess {
@@ -214,47 +216,4 @@ export class ComposeBackend implements ExecBackend {
             });
         });
     }
-}
-
-/**
- * True when something on loopback answers an HTTP request on `port`.
- *
- * An HTTP exchange, not a TCP connect, and the difference is the whole point.
- * Docker's proxy accepts a connection on every published port whether or not
- * anything is behind it inside the container, so a connect to a free port in
- * the range succeeds and then resets. Measured on this host: connecting to a
- * published, unoccupied 4608 succeeded, and the GET that followed failed with
- * ECONNRESET. A connect-based check would have called every port in the range
- * reachable -- the same lie invariant 5 describes, from the other direction.
- *
- * Any response counts, status included. A bare GET to an MCP endpoint is
- * answered with a 4xx, and that is still proof that a server is behind the
- * published port.
- */
-function reachable(port: number): Promise<boolean> {
-    return new Promise((resolveP) => {
-        const req = request({ host: "127.0.0.1", port, path: "/mcp", method: "GET", timeout: 1000 }, (res) => {
-            res.resume();
-            resolveP(true);
-        });
-        req.on("error", () => resolveP(false));
-        req.on("timeout", () => {
-            req.destroy();
-            resolveP(false);
-        });
-        req.end();
-    });
-}
-
-/** Waits, unless the signal fires first. */
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
-    return new Promise((resolveP) => {
-        const timer = setTimeout(finish, ms);
-        function finish() {
-            clearTimeout(timer);
-            signal.removeEventListener("abort", finish);
-            resolveP();
-        }
-        signal.addEventListener("abort", finish, { once: true });
-    });
 }

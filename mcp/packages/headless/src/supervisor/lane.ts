@@ -12,9 +12,9 @@
 // fall-through this package exists to delete.
 
 import { fail, isLauncherError } from "../core/errors.ts";
-import { allocate, assertUsable, type PortPair, type PortRange } from "../core/ports.ts";
+import { allocate, assertUsable, IDENTITY_PORTS, type PortMap, type PortPair, type PortRange } from "../core/ports.ts";
 import { workspaceUrl, type AccountRef, type DocumentRef } from "../core/target.ts";
-import { wire, type Mode } from "../core/topology.ts";
+import { wire, type LanePorts, type Mode } from "../core/topology.ts";
 import type { ExecBackend } from "../exec/backend.ts";
 import type { BrowserPool } from "../browser/pool.ts";
 import type { NotReady } from "../browser/page.ts";
@@ -66,6 +66,8 @@ export interface LaneDeps {
     readonly backend?: ExecBackend;
     readonly pool: BrowserPool;
     readonly portRange: PortRange;
+    /** How a local port maps to the container's. Identity unless configured. */
+    readonly portMap?: PortMap;
     /** The account's MCP token, for the modes that route by it. */
     readonly userToken?: string;
     readonly connectTimeoutMs?: number;
@@ -122,12 +124,12 @@ async function open(
     const ports = await choosePorts(spec, deps, backend);
     const wiring = wire(spec.mode, spec.account, ports, deps.userToken);
 
-    onEvent({ state: "opening", detail: `starting the MCP server on ${ports.http}` });
+    onEvent({ state: "opening", detail: `starting the MCP server on ${ports.upstream.http}` });
     const server = await backend.start(SERVER_ARGV, wiring.serverEnv, signal);
     notePid(server.pid);
     try {
-        onEvent({ state: "opening", detail: `waiting for ${ports.http} to answer` });
-        const exposure = await backend.expose(ports.http, signal);
+        onEvent({ state: "opening", detail: `waiting for ${ports.local.http} to answer` });
+        const exposure = await backend.expose(ports.local.http, signal);
         try {
             onEvent({ state: "opening", detail: "opening the workspace" });
             const lease = await deps.pool.lease(
@@ -150,7 +152,7 @@ async function open(
                     });
                 }
 
-                onEvent({ state: "connected", clientUrl: exposure.url, document: spec.document, port: ports });
+                onEvent({ state: "connected", clientUrl: exposure.url, document: spec.document, port: ports.local });
                 await until(signal);
             } finally {
                 await lease.close();
@@ -170,12 +172,20 @@ async function open(
  * Both paths ask the container, never the host: Docker publishes the whole
  * range, so every host-side answer is wrong (invariant 5).
  */
-async function choosePorts(spec: LaneSpec, deps: LaneDeps, backend: ExecBackend): Promise<PortPair> {
-    const busy = await backend.listening();
-    if (spec.port === undefined) return allocate(deps.portRange, busy);
+async function choosePorts(spec: LaneSpec, deps: LaneDeps, backend: ExecBackend): Promise<LanePorts> {
+    const map = deps.portMap ?? IDENTITY_PORTS;
 
-    assertUsable(spec.port, deps.portRange, busy);
-    return spec.port;
+    // `listening` answers in the container's port space, and allocation happens
+    // in the host's. Ports with no local equivalent -- the image's own server on
+    // 4401, say -- translate to numbers outside the range, which `allocate`
+    // ignores anyway; translating them is harmless and dropping them would be a
+    // filter that has to know the range twice.
+    const busy = (await backend.listening()).map((port) => map.local(port));
+
+    const local = spec.port ?? allocate(deps.portRange, busy);
+    if (spec.port !== undefined) assertUsable(spec.port, deps.portRange, busy);
+
+    return { local, upstream: { http: map.upstream(local.http), ws: map.upstream(local.ws) } };
 }
 
 /** Parks until the lane is cancelled. */

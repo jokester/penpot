@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { AccountRef } from "../core/target.ts";
-import { wire } from "../core/topology.ts";
+import { samePorts, wire } from "../core/topology.ts";
 import { flavourOf, playwrightLaunch } from "./launch.ts";
 import { LeasingPool, type LeaseInit } from "./pool.ts";
 
@@ -22,7 +22,7 @@ function scratchAccount(): AccountRef {
 
 const initFor = (account: AccountRef, port: number): LeaseInit => ({
     account,
-    wiring: wire("exec", account, { http: port, ws: port + 1 }),
+    wiring: wire("exec", account, samePorts({ http: port, ws: port + 1 })),
     url: "about:blank",
 });
 

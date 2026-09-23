@@ -23,6 +23,7 @@ import { Facade } from "./facade/facade.ts";
 import { laneCapacity, supervisorLanes } from "./facade/lanes.ts";
 import { LeaseRegistry } from "./facade/leases.ts";
 import { serveFacade, type Serving } from "./facade/server.ts";
+import { portMap } from "./core/ports.ts";
 import { catalogue } from "./penpot/catalogue.ts";
 import { penpotApi } from "./penpot/rpc.ts";
 import { workerAdmin } from "./provision/admin.ts";
@@ -86,7 +87,8 @@ async function dispatch(options: Options, settings: Settings, env: NodeJS.Proces
     if (options.command === "provision") return await provision(options, backend, env, io);
 
     const pool = new LeasingPool(playwrightLaunch(launchOptions(env)));
-    const deps: LaneDeps = { ...(backend === undefined ? {} : { backend }), pool, portRange };
+    const map = portMap(portRange, settings.deployment?.upstreamPortRange);
+    const deps: LaneDeps = { ...(backend === undefined ? {} : { backend }), pool, portRange, portMap: map };
     const supervisor = new LaneSupervisor(deps);
 
     const leftovers = await scan({

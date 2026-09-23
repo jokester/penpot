@@ -13,6 +13,21 @@ import { normalizeOrigin } from "./target.ts";
 import type { PortPair } from "./ports.ts";
 
 /**
+ * A lane's two port pairs, which are the same pair in most deployments.
+ *
+ * They differ when the container's ports are published somewhere else -- a
+ * local range that collides with something already on the host, say. The
+ * distinction is not cosmetic: `local` is what the browser dials and what the
+ * agent connects to, `upstream` is what the server inside the container binds,
+ * and wiring a lane with the wrong one of them produces a server nothing can
+ * reach and a readiness check that waits for a socket that will never open.
+ */
+export interface LanePorts {
+    readonly local: PortPair;
+    readonly upstream: PortPair;
+}
+
+/**
  * Where a lane's MCP server comes from.
  *
  * All four are wired here even though v1 implements only `exec` (SPEC 3b).
@@ -45,6 +60,11 @@ export interface Wiring {
     readonly serverEnv: Readonly<Record<string, string>>;
 }
 
+/** The common case: the container's ports are published as themselves. */
+export function samePorts(pair: PortPair): LanePorts {
+    return { local: pair, upstream: pair };
+}
+
 /**
  * Builds the wiring for one lane.
  *
@@ -52,7 +72,7 @@ export interface Wiring {
  * `builtin`; `userToken` is the reverse. Passing the wrong combination throws
  * rather than producing a half-addressed lane.
  */
-export function wire(mode: Mode, account: AccountRef, ports: PortPair | null, userToken?: string): Wiring {
+export function wire(mode: Mode, account: AccountRef, ports: LanePorts | null, userToken?: string): Wiring {
     const origin = normalizeOrigin(account.origin);
 
     if (mode === "builtin") {
@@ -82,19 +102,21 @@ export function wire(mode: Mode, account: AccountRef, ports: PortPair | null, us
     // while the login appears to have worked.
     return {
         mode,
-        injectWsUri: `ws://localhost:${ports.ws}`,
-        clientUrl: `http://127.0.0.1:${ports.http}/mcp`,
+        // The browser's half is local: it runs where the launcher runs.
+        injectWsUri: `ws://localhost:${ports.local.ws}`,
+        clientUrl: `http://127.0.0.1:${ports.local.http}/mcp`,
         needsServer: true,
         needsUserToken: false,
+        // The server's half is upstream: it binds inside the container.
         serverEnv: {
-            PENPOT_MCP_SERVER_PORT: String(ports.http),
-            PENPOT_MCP_WEBSOCKET_PORT: String(ports.ws),
+            PENPOT_MCP_SERVER_PORT: String(ports.upstream.http),
+            PENPOT_MCP_WEBSOCKET_PORT: String(ports.upstream.ws),
             // Invariant 9. The 2.17 bundle builds its ReplServer unconditionally
             // and has no switch, but it does read this port -- so aim it at a
             // port that is already bound and the listen fails, silently and
             // harmlessly. The server's own HTTP port is bound first, so it is
             // always the right collision to pick.
-            PENPOT_MCP_REPL_PORT: String(ports.http),
+            PENPOT_MCP_REPL_PORT: String(ports.upstream.http),
         },
     };
 }

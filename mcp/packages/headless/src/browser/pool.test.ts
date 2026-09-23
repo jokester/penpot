@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import type { AccountRef } from "../core/target.ts";
-import { wire } from "../core/topology.ts";
+import { samePorts, wire } from "../core/topology.ts";
 import { flavourOf } from "./launch.ts";
 import { LeasingPool, type BrowserKey, type BrowserSession, type Launch, type Lease, type LeaseInit } from "./pool.ts";
 
@@ -11,7 +11,7 @@ const OTHER: AccountRef = { ...ACCOUNT, name: "second", profileDir: "/tmp/profil
 
 const init = (account: AccountRef = ACCOUNT, port = 4601): LeaseInit => ({
     account,
-    wiring: wire("exec", account, { http: port, ws: port + 1 }),
+    wiring: wire("exec", account, samePorts({ http: port, ws: port + 1 })),
     url: "http://localhost:9001/#/workspace?team-id=t&file-id=f",
 });
 

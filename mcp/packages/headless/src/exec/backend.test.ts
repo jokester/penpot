@@ -1,16 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resolve } from "node:path";
 
 import type { Deployment } from "../core/config.ts";
 import { isLauncherError } from "../core/errors.ts";
 import { allocate } from "../core/ports.ts";
 import { backendFor } from "./backend.ts";
 import { ComposeBackend } from "./compose.ts";
+import { KubectlBackend } from "./kubectl.ts";
 import { execBackendContract, type ContractHarness } from "./contract.ts";
 import { FakeExecBackend } from "./fake.ts";
 
 const RANGE = { lo: 4601, hi: 4608 };
+const HOST = "127.0.0.1";
 
 /** The live stack, driven only when explicitly asked for. */
 const E2E = process.env.MCP_HEADLESS_E2E === "1";
@@ -26,6 +27,7 @@ execBackendContract("fake", async (): Promise<ContractHarness> => {
             env: { PENPOT_MCP_SERVER_PORT: String(port), PENPOT_MCP_WEBSOCKET_PORT: String(port + 1) },
         }),
         freePort: async () => allocate(RANGE, await backend.listening()).http,
+        upstreamOf: (port) => port,
         deadPort: () => 4607,
         cleanup: async (pids) => {
             for (const pid of pids) await backend.kill(pid);
@@ -60,23 +62,27 @@ test("a killed process stops being running", async () => {
 
 // --- the factory ---------------------------------------------------------
 
-test("an unimplemented backend is refused by name, not by a missing branch", async () => {
-    const kubectl: Deployment = {
-        backend: "kubectl",
-        exposure: "none",
-        portRange: RANGE,
-        configDir: "/etc",
-        kubectl: { namespace: "penpot", selector: "app=penpot-mcp" },
-    };
+const KUBECTL: Deployment = {
+    backend: "kubectl",
+    exposure: "none",
+    host: HOST,
+    portRange: RANGE,
+    configDir: "/etc",
+    kubectl: { namespace: "penpot", selector: "app=penpot-mcp" },
+};
 
-    await assert.rejects(
-        () => backendFor(kubectl),
-        (err: unknown) => isLauncherError(err) && err.code === "not-configured" && err.detail.backend === "kubectl"
-    );
+test("a kubectl deployment builds a kubectl backend", async () => {
+    assert.equal((await backendFor(KUBECTL)).kind, "kubectl");
 });
 
 test("a compose deployment with no compose block is refused", () => {
-    const broken: Deployment = { backend: "compose", exposure: "none", portRange: RANGE, configDir: "/etc" };
+    const broken: Deployment = {
+        backend: "compose",
+        exposure: "none",
+        host: HOST,
+        portRange: RANGE,
+        configDir: "/etc",
+    };
 
     assert.throws(
         () => new ComposeBackend(broken),
@@ -84,45 +90,92 @@ test("a compose deployment with no compose block is refused", () => {
     );
 });
 
+test("a kubectl deployment with no kubectl block is refused", () => {
+    const broken: Deployment = {
+        backend: "kubectl",
+        exposure: "none",
+        host: HOST,
+        portRange: RANGE,
+        configDir: "/etc",
+    };
+
+    assert.throws(
+        () => new KubectlBackend(broken),
+        (err: unknown) => isLauncherError(err) && err.code === "not-configured"
+    );
+});
+
 // --- the real thing, opt in ----------------------------------------------
+//
+// Against the cluster, never against compose: those containers belong to
+// another service now. The namespace is ~/Homelab/home-cluster/ns-penpot, the
+// MCP pod carries `app=penpot-mcp`, and 4601-4608 are hostPorts on the node's
+// loopback -- so a launcher running ON the node needs exposure "none" and one
+// running anywhere else needs "port-forward". Which of those is under test is
+// the environment's choice, because only the second works from off-node.
 
-const HOME_CLUSTER = resolve(import.meta.dirname, "../../../../../deploy/home-cluster");
+// A local range that is deliberately NOT the pod's: 4601-4608 are taken on
+// this host by an unrelated stack's docker-proxy, which accepts a connection
+// and resets it. That is the case upstreamPortRange exists for, so the live
+// run exercises the mapping rather than the identity.
+const LOCAL_RANGE = { lo: 5601, hi: 5608 };
 
-const COMPOSE: Deployment = {
-    backend: "compose",
-    exposure: "none",
-    portRange: RANGE,
-    configDir: HOME_CLUSTER,
-    compose: { projectDir: ".", service: "penpot-mcp" },
+const NAMESPACE = process.env.MCP_HEADLESS_E2E_NAMESPACE ?? "penpot";
+const KUBECONFIG = process.env.MCP_HEADLESS_E2E_KUBECONFIG;
+const EXPOSURE = process.env.MCP_HEADLESS_E2E_EXPOSURE === "none" ? "none" : "port-forward";
+
+const OFFSET = RANGE.lo - LOCAL_RANGE.lo;
+
+const LIVE: Deployment = {
+    backend: "kubectl",
+    exposure: EXPOSURE,
+    host: HOST,
+    portRange: LOCAL_RANGE,
+    upstreamPortRange: RANGE,
+    configDir: "/etc",
+    kubectl: {
+        namespace: NAMESPACE,
+        selector: "app=penpot-mcp",
+        ...(KUBECONFIG === undefined ? {} : { kubeconfig: KUBECONFIG }),
+    },
 };
 
 if (E2E) {
-    execBackendContract("compose", async (): Promise<ContractHarness> => {
-        const backend = new ComposeBackend(COMPOSE, { reachableTimeoutMs: 3_000 });
+    execBackendContract("kubectl", async (): Promise<ContractHarness> => {
+        const backend = new KubectlBackend(LIVE, { reachableTimeoutMs: 8_000 });
 
         return {
             backend,
-            serverFor: (port) => ({
+            serverFor: (local) => ({
                 argv: [
                     "node",
                     "-e",
                     "require('node:http').createServer((q, s) => s.end('ok'))" +
                         ".listen(Number(process.env.PENPOT_MCP_SERVER_PORT), '0.0.0.0')",
                 ],
-                env: { PENPOT_MCP_SERVER_PORT: String(port) },
+                // 0.0.0.0, not loopback: a lane on the pod's own loopback is
+                // invisible to portmap and to port-forward alike.
+                env: { PENPOT_MCP_SERVER_PORT: String(local + OFFSET) },
             }),
-            freePort: async () => allocate(RANGE, await backend.listening()).http,
-            deadPort: () => 4608,
+            // `listening` answers in the pod's port space; allocation happens
+            // in the host's, so the busy list is translated down first.
+            freePort: async () =>
+                allocate(
+                    LOCAL_RANGE,
+                    (await backend.listening()).map((port) => port - OFFSET)
+                ).http,
+            upstreamOf: (port) => port + OFFSET,
+            deadPort: () => LOCAL_RANGE.hi,
             cleanup: async (pids) => {
-                // The container here is the operator's real one, so a failed
+                // The pod here is the operator's real one, so a failed
                 // assertion must not leave a server behind.
                 for (const pid of pids) await backend.kill(pid).catch(() => undefined);
             },
         };
     });
 
-    test("compose: listening() sees the container's own server", async () => {
-        const backend = new ComposeBackend(COMPOSE);
+    test("kubectl: listening() sees the pod's own server", async () => {
+        const backend = new KubectlBackend(LIVE);
         const ports = await backend.listening();
 
         // The image's default multi-user server, HTTP on IPv4 and WebSocket on
@@ -131,13 +184,26 @@ if (E2E) {
         assert.ok(ports.includes(4402), `expected 4402 among ${ports.join(" ")}`);
     });
 
-    test("compose: run reports a command's exit code", async () => {
-        const backend = new ComposeBackend(COMPOSE);
-        const signal = AbortSignal.timeout(15_000);
+    test("kubectl: run reports a command's exit code", async () => {
+        const backend = new KubectlBackend(LIVE);
+        const signal = AbortSignal.timeout(20_000);
 
         assert.equal((await backend.run(["true"], signal)).code, 0);
         assert.notEqual((await backend.run(["sh", "-c", "exit 3"], signal)).code, 0);
     });
+
+    test("kubectl: the admin container is a different pod from the MCP one", async () => {
+        // The one thing role resolution has to get right: manage.py lives in
+        // the backend image and the MCP image has no such thing.
+        const backend = new KubectlBackend(LIVE);
+        const signal = AbortSignal.timeout(30_000);
+
+        const admin = await backend.run(["sh", "-c", "ls manage.py"], signal, { container: "admin" });
+        assert.equal(admin.code, 0, `${admin.stdout}${admin.stderr}`);
+
+        const mcp = await backend.run(["sh", "-c", "ls manage.py"], signal);
+        assert.notEqual(mcp.code, 0, "the MCP pod should not have manage.py");
+    });
 } else {
-    test("compose contract is skipped without MCP_HEADLESS_E2E=1", { skip: true }, () => undefined);
+    test("kubectl contract is skipped without MCP_HEADLESS_E2E=1", { skip: true }, () => undefined);
 }

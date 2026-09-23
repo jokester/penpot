@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { isLauncherError } from "./errors.ts";
 import type { PortPair } from "./ports.ts";
 import type { AccountRef } from "./target.ts";
-import { isPluginSocket, wire, type Mode } from "./topology.ts";
+import { isPluginSocket, samePorts, wire, type Mode } from "./topology.ts";
 
 const SELF: AccountRef = {
     name: "mcp-worker",
@@ -49,7 +49,7 @@ test("a token with URL-significant characters survives", () => {
 
 test("every server mode injects the port it is actually on", () => {
     for (const mode of SERVER_MODES) {
-        const w = wire(mode, SELF, PORTS);
+        const w = wire(mode, SELF, samePorts(PORTS));
 
         assert.equal(w.injectWsUri, "ws://localhost:4604", mode);
         assert.equal(w.clientUrl, "http://127.0.0.1:4603/mcp", mode);
@@ -59,7 +59,7 @@ test("every server mode injects the port it is actually on", () => {
 });
 
 test("only builtin contends for the account's one plugin slot", () => {
-    const needs = (m: Mode) => wire(m, SELF, PORTS, "tok").needsUserToken;
+    const needs = (m: Mode) => wire(m, SELF, samePorts(PORTS), "tok").needsUserToken;
 
     assert.deepEqual([needs("builtin"), needs("exec"), needs("local"), needs("image")], [true, false, false, false]);
 });
@@ -77,7 +77,7 @@ test("the worker is pointed at localhost, never a LAN address", () => {
     // Invariant 7: hardened session cookies are Secure, and only a trustworthy
     // origin keeps them. A lane addressed by IP loses its session while the
     // login appears to have worked.
-    const w = wire("exec", { ...SELF, origin: "http://192.168.100.200:9001" }, PORTS);
+    const w = wire("exec", { ...SELF, origin: "http://192.168.100.200:9001" }, samePorts(PORTS));
 
     assert.ok(w.injectWsUri?.includes("localhost"));
     assert.ok(w.clientUrl.includes("127.0.0.1"));
@@ -87,7 +87,7 @@ test("the REPL is aimed at a port that is already bound", () => {
     // Invariant 9. The 2.17 bundle builds its ReplServer unconditionally and
     // offers no switch, so the only way to suppress it is to make its listen
     // fail. The server's own HTTP port is bound first.
-    const env = wire("exec", SELF, PORTS).serverEnv;
+    const env = wire("exec", SELF, samePorts(PORTS)).serverEnv;
 
     assert.deepEqual(env, {
         PENPOT_MCP_SERVER_PORT: "4603",
@@ -100,7 +100,7 @@ test("the REPL is aimed at a port that is already bound", () => {
 test("the readiness check matches the injected port, not the default", () => {
     // The failure this prevents: isPluginSocket matched the default 4402 while
     // 4604 had been injected, so a connected lane reported as a timeout.
-    const w = wire("exec", SELF, PORTS);
+    const w = wire("exec", SELF, samePorts(PORTS));
 
     assert.ok(isPluginSocket("ws://localhost:4604/?token=abc", w));
     assert.ok(!isPluginSocket("ws://localhost:4402/", w));
@@ -108,7 +108,7 @@ test("the readiness check matches the injected port, not the default", () => {
 });
 
 test("the readiness check ignores Penpot's other sockets", () => {
-    const w = wire("exec", SELF, PORTS);
+    const w = wire("exec", SELF, samePorts(PORTS));
 
     // The notifications socket rides the app's own origin and port.
     assert.ok(!isPluginSocket("ws://localhost:9001/ws/notifications?session-id=1", w));
@@ -123,7 +123,7 @@ test("builtin recognises the instance's own socket by path", () => {
 });
 
 test("an unparseable socket URL is not a match rather than a crash", () => {
-    assert.equal(isPluginSocket("not a url", wire("exec", SELF, PORTS)), false);
+    assert.equal(isPluginSocket("not a url", wire("exec", SELF, samePorts(PORTS))), false);
     assert.equal(isPluginSocket("not a url", wire("builtin", CLOUD, null, "tok")), false);
 });
 

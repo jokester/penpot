@@ -15,8 +15,17 @@ export interface ContractHarness {
     readonly backend: ExecBackend;
     /** A command and environment that makes `port` listen inside the container. */
     serverFor(port: number): { argv: string[]; env: Record<string, string> };
-    /** A port the backend currently considers free. */
+    /** A local port the backend currently considers free. */
     freePort(): Promise<number>;
+    /**
+     * The in-container port behind a local one.
+     *
+     * The suite needs both spaces: it asks the backend to expose a local port
+     * and then asks the container what is listening, and those are the same
+     * number only when the deployment publishes one-to-one. Identity is the
+     * right answer for a harness with no mapping.
+     */
+    upstreamOf(local: number): number;
     /** A port nothing will ever answer on, for the unreachable case. */
     deadPort(): number;
     /**
@@ -49,7 +58,8 @@ export function execBackendContract(name: string, make: () => Promise<ContractHa
 
         try {
             const port = await h.freePort();
-            assert.ok(!(await backend.listening()).includes(port), "the chosen port should start free");
+            const inContainer = h.upstreamOf(port);
+            assert.ok(!(await backend.listening()).includes(inContainer), "the chosen port should start free");
 
             const { argv, env } = h.serverFor(port);
             const proc = await backend.start(argv, env, control.signal);
@@ -57,7 +67,7 @@ export function execBackendContract(name: string, make: () => Promise<ContractHa
 
             assert.ok(Number.isInteger(proc.pid) && proc.pid > 0, `expected an in-container pid, got ${proc.pid}`);
 
-            await until("the port to start listening", async () => (await backend.listening()).includes(port));
+            await until("the port to start listening", async () => (await backend.listening()).includes(inContainer));
 
             const exposure = await backend.expose(port, control.signal);
             assert.ok(exposure.url.includes(String(port)), `expected ${exposure.url} to name port ${port}`);
@@ -66,7 +76,7 @@ export function execBackendContract(name: string, make: () => Promise<ContractHa
             await exposure.close(); // closing twice is not an error
 
             await backend.kill(proc.pid);
-            await until("the port to be released", async () => !(await backend.listening()).includes(port));
+            await until("the port to be released", async () => !(await backend.listening()).includes(inContainer));
         } finally {
             control.abort();
             await h.cleanup(started);

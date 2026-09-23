@@ -8,7 +8,7 @@
 
 import { DEFAULT_COLUMNS, parseColumns, type ColumnName } from "./columns.ts";
 import { fail } from "./errors.ts";
-import type { PortRange } from "./ports.ts";
+import { portMap, type PortRange } from "./ports.ts";
 import { parseWorkspaceUrl, type AccountRef, type DocumentRef } from "./target.ts";
 
 /** Reads the few files configuration lives in. Bound to `node:fs` in `main.ts`. */
@@ -24,7 +24,25 @@ export interface Deployment {
     readonly backend: "compose" | "kubectl";
     /** How an in-container port becomes reachable locally. Default `none`: verify only. */
     readonly exposure: "none" | "port-forward";
+    /**
+     * Where a lane's ports appear, to the browser and to the agent alike.
+     *
+     * Almost always loopback, and that is not a default chosen for tidiness:
+     * hardened session cookies are `Secure`, so the browser keeps them for
+     * `http://localhost` and drops them silently for `http://10.43.x.y` while
+     * the login appears to succeed (invariant 7).
+     */
+    readonly host: string;
+    /** The ports the host reaches -- what the agent connects to and the browser dials. */
     readonly portRange: PortRange;
+    /**
+     * The ports the container binds, when they are not the same ones.
+     *
+     * Absent in every deployment that publishes one-to-one, which is both of
+     * the real ones. It exists for the case where the range you want is
+     * already taken on the host running the launcher.
+     */
+    readonly upstreamPortRange?: PortRange;
     /** The directory the deployment file came from; relative paths resolve against it. */
     readonly configDir: string;
     readonly compose?: {
@@ -35,8 +53,11 @@ export interface Deployment {
     };
     readonly kubectl?: {
         readonly context?: string;
+        readonly kubeconfig?: string;
         readonly namespace: string;
         readonly selector: string;
+        /** Where `manage.py` lives. Default `app=penpot-backend`; only provisioning asks. */
+        readonly adminSelector?: string;
     };
 }
 
@@ -64,6 +85,9 @@ export interface Settings {
     readonly accounts: ReadonlyMap<string, Account>;
     readonly tui: TuiSettings;
 }
+
+/** Where a published port appears when the deployment does not say. */
+export const DEFAULT_HOST = "127.0.0.1";
 
 const DEPLOYMENT_FILE = "deployment.json";
 const TUI_FILE = "tui.json";
@@ -133,7 +157,18 @@ export function parseDeployment(json: string, configDir: string): Deployment {
     // kubectl's key is localPortRange: under a cluster the range is about what
     // is reachable from here, not about what the pod publishes.
     const portRange = range(raw.portRange ?? raw.localPortRange);
-    const common = { exposure, portRange, configDir } as const;
+    const host = raw.host === undefined ? DEFAULT_HOST : str(raw, "host");
+    const upstreamPortRange = raw.upstreamPortRange === undefined ? undefined : range(raw.upstreamPortRange);
+    // Built here purely to reject a mismatch while the file is being read,
+    // rather than at the first lane.
+    portMap(portRange, upstreamPortRange);
+    const common = {
+        exposure,
+        host,
+        portRange,
+        configDir,
+        ...(upstreamPortRange === undefined ? {} : { upstreamPortRange }),
+    } as const;
 
     if (backend === "compose") {
         const adminService = raw.adminService === undefined ? undefined : str(raw, "adminService");
@@ -149,6 +184,8 @@ export function parseDeployment(json: string, configDir: string): Deployment {
     }
     if (backend === "kubectl") {
         const context = raw.context === undefined ? undefined : str(raw, "context");
+        const kubeconfig = raw.kubeconfig === undefined ? undefined : str(raw, "kubeconfig");
+        const adminSelector = raw.adminSelector === undefined ? undefined : str(raw, "adminSelector");
         return {
             backend,
             ...common,
@@ -156,6 +193,8 @@ export function parseDeployment(json: string, configDir: string): Deployment {
                 namespace: str(raw, "namespace"),
                 selector: str(raw, "selector"),
                 ...(context ? { context } : {}),
+                ...(kubeconfig ? { kubeconfig } : {}),
+                ...(adminSelector ? { adminSelector } : {}),
             },
         };
     }
