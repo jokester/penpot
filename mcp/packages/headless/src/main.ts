@@ -6,7 +6,9 @@
 // which skipped its own cleanup trap and orphaned a server in the container.
 // Here the process ends in exactly one place, in bin/, after main resolves.
 
-import { readdirSync, readFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 
 import { HELP, parseArgs, type LaneRequest, type Options } from "./args.ts";
 import { load, type ConfigIo, type Settings } from "./core/config.ts";
@@ -23,6 +25,9 @@ import { LeaseRegistry } from "./facade/leases.ts";
 import { serveFacade, type Serving } from "./facade/server.ts";
 import { catalogue } from "./penpot/catalogue.ts";
 import { penpotApi } from "./penpot/rpc.ts";
+import { workerAdmin } from "./provision/admin.ts";
+import { provisioningApi } from "./provision/api.ts";
+import { provisionWorker, type WriteSecret } from "./provision/worker.ts";
 import { normalizeOrigin } from "./core/target.ts";
 import type { LaneDeps, LaneSpec } from "./supervisor/lane.ts";
 import { describe as describeLeftover, scan } from "./supervisor/leftovers.ts";
@@ -39,6 +44,8 @@ export interface Io {
     readonly config?: ConfigIo;
     /** Overrides the container backend, so --check can be driven by a fake. */
     readonly backend?: ExecBackend | null;
+    /** Overrides writing the account file, so provisioning can be driven by a fake. */
+    readonly write?: WriteSecret;
 }
 
 const VERSION = "0.0.0";
@@ -76,6 +83,7 @@ async function dispatch(options: Options, settings: Settings, env: NodeJS.Proces
     const portRange = settings.deployment?.portRange ?? { lo: 4601, hi: 4608 };
 
     if (options.command === "check") return await check(settings, backend, portRange, io);
+    if (options.command === "provision") return await provision(options, backend, env, io);
 
     const pool = new LeasingPool(playwrightLaunch(launchOptions(env)));
     const deps: LaneDeps = { ...(backend === undefined ? {} : { backend }), pool, portRange };
@@ -183,6 +191,55 @@ async function serve(
             await backend.closeAll();
         },
     };
+}
+
+/**
+ * Creates a worker account, and writes the account file the launcher reads.
+ *
+ * Needs the admin container, because there is no RPC command that creates a
+ * profile on an instance with self-registration off.
+ */
+async function provision(
+    options: Options,
+    backend: ExecBackend | undefined,
+    env: NodeJS.ProcessEnv,
+    io: Io
+): Promise<number> {
+    const request = options.provision;
+    if (request === undefined) return 2;
+    if (backend === undefined) {
+        io.err.write(`provisioning needs a deployment; none is configured in ${options.configDir}\n`);
+        return 1;
+    }
+
+    const local = request.email.split("@")[0] ?? request.email;
+    const report = await provisionWorker(
+        {
+            email: request.email,
+            origin: request.origin ?? "http://localhost:9001",
+            account: request.account ?? local,
+            fullName: request.fullName ?? request.account ?? local,
+            invitations: request.invitations,
+            resetPassword: request.resetPassword,
+            mintToken: request.mintToken,
+            fileName: request.fileName,
+        },
+        {
+            admin: workerAdmin(backend),
+            api: provisioningApi(),
+            tokens: penpotApi(),
+            io: io.config ?? nodeConfigIo,
+            accountsDir: `${options.configDir}/accounts`,
+            write: io.write ?? writeSecret,
+            log: (line) => io.out.write(`${line}\n`),
+            newPassword: () => randomBytes(18).toString("base64url"),
+            env,
+        }
+    );
+
+    io.out.write(`\nthe account is named ${report.path.replace(/.*\//, "").replace(/\.env$/, "")}; `);
+    io.out.write("it appears in the TUI's Account field and in --account\n");
+    return 0;
 }
 
 /** Reports wreckage from a previous run, and says nothing else. */
@@ -393,6 +450,20 @@ async function resolveBackend(settings: Settings, io: Io): Promise<ExecBackend |
     if (settings.deployment === undefined) return undefined;
     return await backendFor(settings.deployment);
 }
+
+/**
+ * Writes a file nobody else can read, and does so before there is anything in it.
+ *
+ * The mode is set on the empty file rather than after writing, so the secret is
+ * never briefly world-readable -- a window that is short, real, and entirely
+ * avoidable.
+ */
+const writeSecret: WriteSecret = async (path, contents) => {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, "", { mode: 0o600 });
+    chmodSync(path, 0o600);
+    writeFileSync(path, contents);
+};
 
 /** The real filesystem, bound here and nowhere else. */
 const nodeConfigIo: ConfigIo = {

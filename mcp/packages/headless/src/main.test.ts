@@ -141,3 +141,79 @@ test("a configuration directory with nothing in it still runs --check", async ()
 
     assert.equal(await r.code, 0);
 });
+
+/** `main` without the --config the other tests prepend, so argv[0] is ours. */
+function runRaw(argv: string[], over: Partial<Io> = {}, files: Record<string, string> = FILES) {
+    const out = capture();
+    const err = capture();
+    const io: Io = { out: out.stream, err: err.stream, config: configIo(files), backend: null, ...over };
+    return { out, err, code: main(argv, ENV, io) };
+}
+
+const DEPLOYMENT = {
+    [`${CONFIG}/deployment.json`]: JSON.stringify({
+        backend: "compose",
+        projectDir: ".",
+        service: "penpot-mcp",
+        portRange: [4601, 4608],
+    }),
+};
+
+test("provisioning without a deployment says so instead of half-running", async () => {
+    // There is no RPC command that creates a profile, so with no container to
+    // reach there is nothing this command can do at all.
+    const r = runRaw(["provision-worker-user", "--config", CONFIG, "--email", "w@x.test"], {}, FILES);
+
+    assert.equal(await r.code, 1);
+    assert.ok(r.err.text.includes("provisioning needs a deployment"), r.err.text);
+});
+
+test("provisioning writes the account file under the configured accounts dir", async (t) => {
+    // Driven end to end through main, with only the container and the
+    // filesystem faked: everything between is the code that runs for real.
+    const written = new Map<string, string>();
+    const backend = new FakeExecBackend();
+    const fetches: string[] = [];
+
+    const realFetch = globalThis.fetch;
+    t.after(() => {
+        globalThis.fetch = realFetch;
+    });
+    globalThis.fetch = (async (url: string | URL, init: { body: string }) => {
+        const command = String(url).slice(String(url).lastIndexOf("/") + 1);
+        fetches.push(command);
+        const bodies: Record<string, unknown> = {
+            "login-with-password": { id: "p1", defaultTeamId: "team-1", defaultProjectId: "proj-1" },
+            "get-access-tokens": [],
+            "create-access-token": { token: "tok-new" },
+            "update-profile-props": {},
+            "create-file": { id: "file-1" },
+        };
+        void init;
+        return {
+            ok: true,
+            status: 200,
+            headers: { get: () => (command === "login-with-password" ? "auth-token=abc; Secure" : null) },
+            text: async () => JSON.stringify(bodies[command] ?? {}),
+        };
+    }) as unknown as typeof fetch;
+
+    const r = runRaw(
+        ["provision-worker-user", "--config", CONFIG, "--email", "worker-b@penpot.local"],
+        {
+            backend,
+            write: async (path, contents) => {
+                written.set(path, contents);
+            },
+        },
+        { ...FILES, ...DEPLOYMENT }
+    );
+
+    assert.equal(await r.code, 0);
+    const file = written.get(`${CONFIG}/accounts/worker-b.env`);
+    assert.ok(file !== undefined, `wrote ${[...written.keys()].join(", ")}`);
+    assert.match(file, /PENPOT_EMAIL="worker-b@penpot.local"/);
+    assert.match(file, /userToken=tok-new/);
+    // The profile was created in the admin container, not the MCP one.
+    assert.equal(backend.runs[0]?.container, "admin");
+});

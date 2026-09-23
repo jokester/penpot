@@ -27,7 +27,12 @@ export interface Deployment {
     readonly portRange: PortRange;
     /** The directory the deployment file came from; relative paths resolve against it. */
     readonly configDir: string;
-    readonly compose?: { readonly projectDir: string; readonly service: string };
+    readonly compose?: {
+        readonly projectDir: string;
+        readonly service: string;
+        /** Where `manage.py` lives. Default `penpot-backend`; only provisioning asks. */
+        readonly adminService?: string;
+    };
     readonly kubectl?: {
         readonly context?: string;
         readonly namespace: string;
@@ -131,7 +136,16 @@ export function parseDeployment(json: string, configDir: string): Deployment {
     const common = { exposure, portRange, configDir } as const;
 
     if (backend === "compose") {
-        return { backend, ...common, compose: { projectDir: str(raw, "projectDir"), service: str(raw, "service") } };
+        const adminService = raw.adminService === undefined ? undefined : str(raw, "adminService");
+        return {
+            backend,
+            ...common,
+            compose: {
+                projectDir: str(raw, "projectDir"),
+                service: str(raw, "service"),
+                ...(adminService === undefined ? {} : { adminService }),
+            },
+        };
     }
     if (backend === "kubectl") {
         const context = raw.context === undefined ? undefined : str(raw, "context");

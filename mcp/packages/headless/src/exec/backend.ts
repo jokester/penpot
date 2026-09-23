@@ -39,12 +39,35 @@ export interface Exposure {
     close(): Promise<void>;
 }
 
+/**
+ * Which of the deployment's containers a command runs in.
+ *
+ * A role rather than a service name, because the two backends spell the same
+ * distinction differently -- compose names a service, kubectl a selector -- and
+ * the callers only know which job they want doing.
+ */
+export type Container = "mcp" | "admin";
+
+/** The uncommon half of `run`'s arguments. */
+export interface RunOptions {
+    /** Default "mcp": the container that runs the MCP servers. */
+    readonly container?: Container;
+    /**
+     * Written to the command's stdin, which is then closed.
+     *
+     * The way a secret reaches a command without going on its argv. Both the
+     * host's process list and the container's show argv to anything that can
+     * look, so a password passed as a flag is a password published.
+     */
+    readonly stdin?: string;
+}
+
 /** How the launcher reaches the container its MCP servers run in. */
 export interface ExecBackend {
     readonly kind: "compose" | "kubectl";
 
     /** Runs a short command in the container and collects its output. */
-    run(argv: readonly string[], signal: AbortSignal): Promise<ExecResult>;
+    run(argv: readonly string[], signal: AbortSignal, options?: RunOptions): Promise<ExecResult>;
 
     /**
      * Starts a long-lived process there, resolving once its in-container pid is known.

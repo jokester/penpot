@@ -137,3 +137,79 @@ test("--port still belongs to a lane, not to the endpoint", () => {
     refuses(["--port", "4400"], "--port must follow an --account");
     assert.equal(parseArgs([...lane("--port", "4601")], ENV).lanes[0]?.port, 4601);
 });
+
+test("the bare invocation and `server` are the same command", async () => {
+    // The bare form is in shell history and in MCP client configuration; a
+    // subcommand added beside it must not change what it means.
+    const bare = parseArgs(["--no-tui", "--account", "a", "--file-id", FILE, "--team-id", TEAM], ENV);
+    const named = parseArgs(["server", "--no-tui", "--account", "a", "--file-id", FILE, "--team-id", TEAM], ENV);
+
+    assert.deepEqual(named, bare);
+});
+
+test("a subcommand nobody has heard of is refused naming the ones that exist", async () => {
+    assert.throws(
+        () => parseArgs(["provision"], ENV),
+        (err: unknown) =>
+            isLauncherError(err) && /server/.test(err.message) && /provision-worker-user/.test(err.message)
+    );
+});
+
+test("provisioning needs an email and says so", async () => {
+    assert.throws(
+        () => parseArgs(["provision-worker-user"], ENV),
+        (err: unknown) => isLauncherError(err) && /--email/.test(err.message)
+    );
+});
+
+test("provisioning defaults the account name to the email's local part", async () => {
+    const options = parseArgs(["provision-worker-user", "--email", "worker-a@penpot.local"], ENV);
+
+    assert.equal(options.command, "provision");
+    assert.equal(options.provision?.email, "worker-a@penpot.local");
+    // Left undefined here: main derives it, so the default lives in one place.
+    assert.equal(options.provision?.account, undefined);
+    assert.equal(options.provision?.fileName, "worker-scratch");
+    assert.equal(options.provision?.mintToken, false);
+});
+
+test("a worker can be invited to several teams at once", async () => {
+    const options = parseArgs(
+        ["provision-worker-user", "--email", "w@x.test", "--invite", "link-one", "--invite", "link-two"],
+        ENV
+    );
+
+    assert.deepEqual(options.provision?.invitations, ["link-one", "link-two"]);
+});
+
+test("--file-name '' means no scratch document, not a missing value", async () => {
+    const options = parseArgs(["provision-worker-user", "--email", "w@x.test", "--file-name", ""], ENV);
+
+    assert.equal(options.provision?.fileName, "");
+});
+
+test("--password is refused rather than accepted quietly", async () => {
+    // A flag's value is in the shell history and in every process list on the
+    // host. Ignoring it would leave the password exposed and the caller
+    // thinking it had been used.
+    assert.throws(
+        () => parseArgs(["provision-worker-user", "--email", "w@x.test", "--password", "hunter2"], ENV),
+        (err: unknown) => isLauncherError(err) && /MCP_HEADLESS_WORKER_PASSWORD/.test(err.message)
+    );
+});
+
+test("provisioning opens no endpoint and names no lanes", async () => {
+    const options = parseArgs(["provision-worker-user", "--email", "w@x.test"], ENV);
+
+    assert.equal(options.serve, false);
+    assert.deepEqual(options.lanes, []);
+});
+
+test("a subcommand after the flags is told where it belongs", async () => {
+    // Reporting it as an unknown argument is true and useless: the word is
+    // right, only its position is wrong.
+    assert.throws(
+        () => parseArgs(["--config", "/etc/headless", "server"], ENV),
+        (err: unknown) => isLauncherError(err) && /must come first/.test(err.message)
+    );
+});

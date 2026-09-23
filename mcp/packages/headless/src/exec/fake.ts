@@ -7,7 +7,7 @@
 // starts and vanish when it is killed.
 
 import { fail } from "../core/errors.ts";
-import type { ExecBackend, ExecResult, Exposure, RemoteProcess } from "./backend.ts";
+import type { Container, ExecBackend, ExecResult, Exposure, RemoteProcess, RunOptions } from "./backend.ts";
 
 /** A process the fake pretends to be running. */
 interface FakeProcess {
@@ -21,7 +21,7 @@ export interface FakeOptions {
     /** Ports already listening before anything starts, as a previous run would leave. */
     readonly listening?: readonly number[];
     /** Answers `run`, for the probes that parse a command's output. */
-    readonly runs?: (argv: readonly string[]) => ExecResult | Promise<ExecResult>;
+    readonly runs?: (argv: readonly string[], options: RunOptions) => ExecResult | Promise<ExecResult>;
     /** Makes `start` reject with this message instead of starting. */
     readonly failStart?: string;
     /** Makes `expose` reject, as an unreachable port would. */
@@ -33,6 +33,8 @@ export class FakeExecBackend implements ExecBackend {
 
     /** Every command `run` was asked for, in order, for assertions. */
     readonly commands: string[][] = [];
+    /** The same commands with how they were run, for the ones that care. */
+    readonly runs: { argv: string[]; container: Container; stdin?: string }[] = [];
     /** Exposures opened and not yet closed. A lane that leaks one fails this. */
     openExposures = 0;
 
@@ -52,9 +54,16 @@ export class FakeExecBackend implements ExecBackend {
         if (options.listening !== undefined) this.#preListening = new Set(options.listening);
     }
 
-    async run(argv: readonly string[], _signal: AbortSignal): Promise<ExecResult> {
+    async run(argv: readonly string[], _signal: AbortSignal, options: RunOptions = {}): Promise<ExecResult> {
         this.commands.push([...argv]);
-        return this.#options.runs === undefined ? { code: 0, stdout: "", stderr: "" } : await this.#options.runs(argv);
+        this.runs.push({
+            argv: [...argv],
+            container: options.container ?? "mcp",
+            ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
+        });
+        return this.#options.runs === undefined
+            ? { code: 0, stdout: "", stderr: "" }
+            : await this.#options.runs(argv, options);
     }
 
     async start(

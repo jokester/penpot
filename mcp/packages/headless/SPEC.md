@@ -471,9 +471,32 @@ There is deliberately **no `open` or `close` subcommand**: a one-shot process
 that starts a lane and exits is precisely the detached model that was dropped,
 and it would leave something nobody owns.
 
-Account provisioning (`provision-worker` today) is the one genuinely separate
-job and stays a subcommand:
-`mcp-headless account <name> [--invite …] [--reset-password]`.
+Account provisioning is the one genuinely separate job, and it is a subcommand:
+`mcp-headless provision-worker-user --email E [--invite …] [--reset-password]
+[--mint-token] [--name …] [--full-name …] [--origin …] [--file-name …]`. The
+supervisor is named `server` beside it, and the bare invocation stays a synonym
+for `server` -- it is in shell history and in MCP client configuration, which is
+the thing this package exists to hold still.
+
+Three rules the command follows, each of them a way it can do damage:
+
+- **The password is never a flag.** It is read from
+  `$MCP_HEADLESS_WORKER_PASSWORD`, then from the account file already there, and
+  generated only if neither has it. `--password` is refused rather than ignored,
+  so nobody believes a password in their shell history was used safely. It
+  reaches `manage.py` on stdin, never on argv.
+- **An existing profile keeps its password** unless `--reset-password` says
+  otherwise; a generated password against an existing profile is refused, since
+  the login that followed would fail for a reason nobody would guess.
+- **An existing MCP token is kept** unless `--mint-token` says otherwise:
+  minting deletes the previous one and breaks MCP wherever it is in use. A
+  profile created a moment ago has none, so there minting is free and silent.
+
+Creating the profile is the one step that shells into a container. There is no
+RPC command for it -- self-registration is off on a private instance and a
+worker has no mailbox to confirm from -- so provisioning runs `manage.py` in the
+admin container (`adminService`, default `penpot-backend`) and talks RPC for
+everything after.
 
 ## 10. Configuration
 
@@ -484,7 +507,8 @@ Three layers, most specific wins:
 
    ```json
    { "backend": "compose", "projectDir": "../../deploy/home-cluster",
-     "service": "penpot-mcp", "portRange": [4601, 4608] }
+     "service": "penpot-mcp", "adminService": "penpot-backend",
+     "portRange": [4601, 4608] }
    ```
    ```json
    { "backend": "kubectl", "context": "home", "namespace": "penpot",
@@ -493,9 +517,10 @@ Three layers, most specific wins:
 
    Absent ⇒ `--mode exec` is unavailable and everything else still works, which
    is what keeps the package honest about cloud.
-2. **Account** — `accounts/<name>.env`, mode 600, the shape `provision-worker`
-   writes today: origin, email, password, MCP token, profile directory.
-   Unchanged, so existing files keep working.
+2. **Account** — `accounts/<name>.env`, mode 600, written by
+   `provision-worker-user`: origin, email, password, MCP token, profile
+   directory. The shape is the one the old `provision-worker` wrote, so existing
+   files keep working.
 3. **Invocation** — flags, then the TUI's saved state.
 
 Secrets live in mode-600 files and reach child processes by `--env-file` or

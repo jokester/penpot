@@ -11,7 +11,7 @@ import { resolve } from "node:path";
 import type { Deployment } from "../core/config.ts";
 import { fail } from "../core/errors.ts";
 import { parseListeningPorts } from "./procnet.ts";
-import type { ExecBackend, ExecResult, Exposure, RemoteProcess } from "./backend.ts";
+import type { ExecBackend, ExecResult, Exposure, RemoteProcess, RunOptions } from "./backend.ts";
 
 /** How long to keep proving a freshly started port is reachable, by default. */
 const REACHABLE_TIMEOUT_MS = 30_000;
@@ -21,6 +21,9 @@ export interface ComposeOptions {
     /** How long `expose` keeps retrying before it calls the port unreachable. */
     readonly reachableTimeoutMs?: number;
 }
+
+/** The service `manage.py` lives in, when the deployment does not name one. */
+const DEFAULT_ADMIN_SERVICE = "penpot-backend";
 
 /** How long to wait for a started process to announce its pid. */
 const PID_TIMEOUT_MS = 20_000;
@@ -36,6 +39,7 @@ export class ComposeBackend implements ExecBackend {
 
     readonly #projectDir: string;
     readonly #service: string;
+    readonly #adminService: string;
     /** Exec clients by in-container pid, so killing a process also ends its client. */
     readonly #clients = new Map<number, ChildProcess>();
     readonly #logs = new Map<number, string[]>();
@@ -48,11 +52,13 @@ export class ComposeBackend implements ExecBackend {
         // Relative paths in the deployment file are relative to the file.
         this.#projectDir = resolve(deployment.configDir, deployment.compose.projectDir);
         this.#service = deployment.compose.service;
+        this.#adminService = deployment.compose.adminService ?? DEFAULT_ADMIN_SERVICE;
         this.#reachableTimeoutMs = options.reachableTimeoutMs ?? REACHABLE_TIMEOUT_MS;
     }
 
-    async run(argv: readonly string[], signal: AbortSignal): Promise<ExecResult> {
-        return await this.#collect(["exec", "-T", this.#service, ...argv], signal);
+    async run(argv: readonly string[], signal: AbortSignal, options: RunOptions = {}): Promise<ExecResult> {
+        const service = options.container === "admin" ? this.#adminService : this.#service;
+        return await this.#collect(["exec", "-T", service, ...argv], signal, options.stdin);
     }
 
     /**
@@ -177,16 +183,19 @@ export class ComposeBackend implements ExecBackend {
         return { url: `http://127.0.0.1:${port}/mcp`, close: async () => undefined };
     }
 
-    #spawn(args: readonly string[]): ChildProcess {
+    #spawn(args: readonly string[], stdin: "ignore" | "pipe" = "ignore"): ChildProcess {
         return spawn("docker", ["compose", ...args], {
             cwd: this.#projectDir,
-            stdio: ["ignore", "pipe", "pipe"],
+            stdio: [stdin, "pipe", "pipe"],
         });
     }
 
-    #collect(args: readonly string[], signal: AbortSignal): Promise<ExecResult> {
+    #collect(args: readonly string[], signal: AbortSignal, stdin?: string): Promise<ExecResult> {
         return new Promise((resolveP, rejectP) => {
-            const child = this.#spawn(args);
+            const child = this.#spawn(args, stdin === undefined ? "ignore" : "pipe");
+            // Closed immediately after, so a command that reads until EOF --
+            // manage.py's password prompt, for one -- does not hang.
+            if (stdin !== undefined) child.stdin?.end(stdin);
             let stdout = "";
             let stderr = "";
 

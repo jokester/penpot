@@ -151,9 +151,12 @@ export interface ExecResult   { readonly code: number; readonly stdout: string; 
 export interface RemoteProcess { readonly pid: number; }
 export interface Exposure     { readonly url: string; close(): Promise<void>; }
 
+export type Container = "mcp" | "admin";
+export interface RunOptions   { readonly container?: Container; readonly stdin?: string; }
+
 export interface ExecBackend {
   readonly kind: "compose" | "kubectl";
-  run(argv: readonly string[], signal: AbortSignal): Promise<ExecResult>;
+  run(argv: readonly string[], signal: AbortSignal, options?: RunOptions): Promise<ExecResult>;
   start(argv: readonly string[], env: Readonly<Record<string, string>>,
         signal: AbortSignal): Promise<RemoteProcess>;
   kill(pid: number): Promise<void>;
@@ -172,6 +175,18 @@ that can actually end the process, and every backend must produce one.
 ports are already published and `expose` only verifies reachability; under
 `kubectl` with `exposure: "port-forward"` it owns a child process. Keeping the
 same shape means a lane's `finally` does not branch on the backend.
+
+**`run` names a container by role, not by service.** Compose spells the
+distinction as a service and kubectl as a selector, and the callers only know
+which job they want doing: lanes want the MCP container, provisioning wants the
+one `manage.py` lives in. Under compose the second is `penpot-backend`, or
+whatever `adminService` names.
+
+**`run`'s `stdin` is how a secret reaches a command.** Both the host's process
+list and the container's show argv to anything that can look, so a password
+passed as a flag is a password published. `manage.py` prompts for one when
+`-p` is absent and, with no terminal, `getpass` reads it from stdin instead --
+confirmed against the running instance rather than assumed.
 
 ### `exec/procnet.ts`
 
@@ -209,6 +224,57 @@ that does it knowingly, once.
 `Session` carries the cookie explicitly because Node's cookie handling will not
 send a `Secure` cookie over loopback http, which produced 401s that looked like
 an auth bug.
+
+`rpcCaller` is the transport on its own -- kebab-case out, camelCase back, the
+cookie by hand, and what an HTTP failure becomes. `provision/` posts through it
+too, so those decisions stay in one place without `PenpotApi` growing the
+command it exists to withhold.
+
+---
+
+## `provision/` — creating the one account that has a password
+
+```ts
+export interface WorkerAdmin {
+  createProfile(name: string, email: string, password: string): Promise<"created" | "exists">;
+  setPassword(email: string, password: string): Promise<void>;
+}
+
+export interface ProvisioningApi {
+  login(origin: string, email: string, password: string): Promise<{ session: Session; profile: Profile }>;
+  acceptInvitation(origin: string, s: Session, token: string): Promise<Joined>;
+  createMcpToken(origin: string, s: Session): Promise<string>;   // destructive
+  enableMcp(origin: string, s: Session): Promise<void>;
+  createFile(origin: string, s: Session, projectId: string, name: string): Promise<string>;
+}
+
+export function provisionWorker(request: WorkerRequest, deps: WorkerDeps): Promise<WorkerReport>;
+```
+
+**This is where `createMcpToken` lives, and nothing else imports it.** Keeping
+the capability in a module the TUI never reaches is a cheaper guarantee than
+remembering not to call it.
+
+**A profile needs the admin container.** There is no RPC command that creates
+one: self-registration is off on a private instance, and a worker has no mailbox
+to confirm from. `manage.py` reaches the backend's PREPL and makes the profile
+directly, so this one step shells in and the rest is RPC.
+
+**Minting is free for a profile that was just created and gated for one that was
+not.** A new account has no token to destroy; an existing one may have a token
+in use, so replacing it takes `--mint-token`. Without the flag the existing
+token is read back with `readMcpToken` and written to the account file unchanged.
+
+**Re-running is the supported way to add a team or rewrite a lost account file,**
+which is why so much of `provisionWorker` reads before it writes: the password
+comes from `$MCP_HEADLESS_WORKER_PASSWORD`, then from the account file already
+there, and is generated only if neither has it. An existing profile plus a
+generated password is refused rather than attempted, because the login that
+followed would fail for a reason nobody would guess.
+
+**The password is never a flag.** `--password` is refused rather than ignored:
+someone typing it has already put it in their shell history and in every process
+list on the host, and accepting it silently would leave them thinking otherwise.
 
 ---
 

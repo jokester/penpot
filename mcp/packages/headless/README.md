@@ -47,6 +47,7 @@ the launcher owns every lane it opens, so the way to end them is to end it.
 
 ```sh
 pnpm start              # the lane list, and the MCP endpoint
+pnpm start -- server    # the same thing, named
 pnpm start -- --no-tui  # the same, logging a line per transition instead
 ```
 
@@ -85,6 +86,44 @@ The form is prefilled from the account files and from a live list of each
 account's documents, shown as `team / document`. If Penpot cannot be reached
 the ids can still be typed, which is what the old tooling always required.
 
+## Provisioning a worker
+
+A worker is the one kind of Penpot account that has a password: people sign in
+through an identity provider, and a headless browser cannot. Keeping worker
+accounts separate from human ones is what bounds the reach of a leaked worker
+credential.
+
+```sh
+pnpm start -- provision-worker-user --email worker-a@penpot.local \
+    --invite 'https://penpot.example/#/auth/verify-token?token=...'
+```
+
+That creates the profile, accepts the invitations, turns MCP on, mints the
+token, makes a scratch document, and writes
+`~/.config/mcp-headless/accounts/worker-a.env` mode 600. The account then
+appears in the lane form's Account field and in `--account`.
+
+The invitation is how a worker reaches documents it does not own: invite it from
+Penpot under Team → Invitations and pass the link here. Without one it sees only
+its own scratch project.
+
+Re-running is how you add a team or rewrite a lost account file. Two things make
+that safe to do:
+
+- **The password is reused, not regenerated.** It comes from
+  `$MCP_HEADLESS_WORKER_PASSWORD`, then from the account file already there. An
+  existing account with neither is refused rather than guessed at — pass
+  `--reset-password` to set a new one. There is no `--password` flag: a flag's
+  value is in the shell history and in every process list on the host.
+- **The MCP token is kept.** Minting one deletes the account's previous token
+  and breaks MCP wherever it is in use, so an account that already has one keeps
+  it unless you pass `--mint-token`. A profile created a moment ago has no token
+  to destroy, so it is minted without asking.
+
+Provisioning needs the admin container, because there is no RPC command that
+creates a profile: self-registration is off on a private instance, and a worker
+has no mailbox to confirm from.
+
 ## Configuration
 
 Two files, in `$XDG_CONFIG_HOME/mcp-headless` (so `~/.config/mcp-headless` by
@@ -113,6 +152,8 @@ without it `--mode exec` is unavailable and everything else still works.
 
 `projectDir` is resolved against the directory the file is in, so an absolute
 path is the safe spelling when configuration lives outside the repo.
+`adminService` names the container `manage.py` lives in and defaults to
+`penpot-backend`; only `provision-worker-user` asks for it.
 
 **`portRange` must match what the deployment actually publishes.** It is
 declared twice — here, and in the compose file's published range — and the two

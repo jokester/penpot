@@ -68,15 +68,25 @@ export type RpcFetch = (
 // directions parses cleanly and yields nothing -- every optional field reads as
 // absent and every boolean as false.
 
-/** Builds the API over whatever performs requests. */
-export function penpotApi(doFetch: RpcFetch = globalThis.fetch as unknown as RpcFetch): PenpotApi {
-    /** Posts one RPC command and returns its parsed body and any Set-Cookie. */
-    async function call(
-        origin: string,
-        command: string,
-        payload: unknown,
-        session?: Session
-    ): Promise<{ body: unknown; setCookie: string | null }> {
+/** One command's answer: the parsed body, and the cookie a login sets. */
+export interface RpcReply {
+    readonly body: unknown;
+    readonly setCookie: string | null;
+}
+
+/** Posts one RPC command, having dealt with cookies, encoding and failure. */
+export type RpcCall = (origin: string, command: string, payload: unknown, session?: Session) => Promise<RpcReply>;
+
+/**
+ * The transport on its own, so provisioning can reach commands this API omits.
+ *
+ * Shared deliberately: kebab-case going out, the by-hand cookie, and what an
+ * HTTP failure turns into are decided once. Widening `PenpotApi` instead would
+ * put `create-access-token` within reach of the TUI, which is the one place it
+ * must never be.
+ */
+export function rpcCaller(doFetch: RpcFetch = globalThis.fetch as unknown as RpcFetch): RpcCall {
+    return async function call(origin, command, payload, session) {
         const url = `${normalizeOrigin(origin)}/api/rpc/command/${command}`;
         const headers: Record<string, string> = {
             "Content-Type": "application/json",
@@ -103,7 +113,12 @@ export function penpotApi(doFetch: RpcFetch = globalThis.fetch as unknown as Rpc
             body: text.trim() === "" ? null : JSON.parse(text),
             setCookie: response.headers.get("set-cookie"),
         };
-    }
+    };
+}
+
+/** Builds the API over whatever performs requests. */
+export function penpotApi(doFetch: RpcFetch = globalThis.fetch as unknown as RpcFetch): PenpotApi {
+    const call = rpcCaller(doFetch);
 
     return {
         async loginWithPassword(origin, email, password) {

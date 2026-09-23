@@ -340,7 +340,7 @@ down, or deliberately dropped first.
 | `verify`, `diagnose`, `smoke` spikes | **specified, not built** (SPEC §13b) |
 | `--mcp builtin \| local`, `--multi-user`, `--ws-uri`, `--host`, `--env-file`, `--profile` | superseded or out of scope; see the table in the Decision log |
 
-- [ ] **T9.1 `mcp-headless provision-worker-user` and `mcp-headless server`.**
+- [x] **T9.1 `mcp-headless provision-worker-user` and `mcp-headless server`.**
   Two named commands where there is currently one unnamed one. `server` is what
   the bare invocation does today — supervise and serve — and naming it leaves
   room beside it. `provision-worker-user` ports `provision-worker`: create the
@@ -429,6 +429,20 @@ down, or deliberately dropped first.
   a loose password beside an `AccountRef`, which allows pairing a password with
   the wrong email and makes every caller handle a secret. The account file
   already carries both.
+- 2026-09-23: **`ExecBackend.run` names a container by role, not by service.**
+  Provisioning needs `manage.py`, which lives in the backend image and not the
+  MCP one. A role keeps compose's service and kubectl's selector behind the
+  same interface, and keeps the caller saying which job it wants rather than
+  which container it guessed at.
+- 2026-09-23: **The password goes to `manage.py` on stdin.** The old script
+  passed `-p`, which publishes it to the host's process list and the
+  container's at once. `getpass` falls back to stdin with no terminal --
+  checked against the running instance, not assumed -- so the flag was never
+  needed.
+- 2026-09-23: **Minting an MCP token is gated by what it would destroy, not by
+  a flag on principle.** A profile created a moment ago has no token, so
+  minting is free; one that already has a token keeps it unless `--mint-token`
+  is passed. The flag is then required exactly when it can break something.
 - 2026-09-23: **Interactive login removed rather than wired up.** It was
   written and tested and nothing called it — the same shape as
   `PluginWatch.dropped`. A worker account is provisioned with a password we
