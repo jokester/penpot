@@ -325,6 +325,35 @@ here changes upstream code or runs non-stock code in the container.
   driven concurrently through the one endpoint; two sessions on one document do
   not interleave; quitting the launcher leaves the container at baseline.
 
+## Milestone 9 — Cutover gaps
+
+What `run-mcp-worker`, `run-mcp-worker.py` and `mcp/packages/host/` can still do
+that the launcher cannot. T6.3 deletes them, so each is either ported, written
+down, or deliberately dropped first.
+
+| old capability | disposition |
+| --- | --- |
+| `spikes/login.js` — interactive login | **dropped.** A worker account is provisioned with a password we wrote; the code existed, was tested and was never called |
+| `--browser container` — image-pinned browser | **documented, not built** (SPEC §14.3). The exact `playwright` pin already fixes the build |
+| `--repl` — the server's REPL console | **dropped.** The suppression stays, and the compose comment records how to start one deliberately |
+| `provision-worker` | **ported** — T9.1 |
+| `verify`, `diagnose`, `smoke` spikes | **specified, not built** (SPEC §13b) |
+| `--mcp builtin \| local`, `--multi-user`, `--ws-uri`, `--host`, `--env-file`, `--profile` | superseded or out of scope; see the table in the Decision log |
+
+- [ ] **T9.1 `mcp-headless provision-worker-user` and `mcp-headless server`.**
+  Two named commands where there is currently one unnamed one. `server` is what
+  the bare invocation does today — supervise and serve — and naming it leaves
+  room beside it. `provision-worker-user` ports `provision-worker`: create the
+  profile, invite it to a team, mint the MCP token, write the account file mode
+  600. The token call is the dangerous one — `create-access-token` with type
+  `mcp` deletes the account's existing token — so it lives here, behind an
+  explicit flag, and stays out of `PenpotApi` (API.md). — acceptance: the bare
+  invocation and `server` behave identically and a stray subcommand is refused
+  naming both; provisioning is driven end to end against a fake `PenpotApi`,
+  writes mode 600, and never calls `create-access-token` without the flag;
+  `--reset-password` and `--invite` carry over; re-provisioning an existing
+  account is refused unless asked, because the password only lives in the file.
+
 ## Open questions
 
 - **Two lanes, one plugin connection.** *(blocks T6.3.)* With two lanes in one
@@ -400,6 +429,10 @@ here changes upstream code or runs non-stock code in the container.
   a loose password beside an `AccountRef`, which allows pairing a password with
   the wrong email and makes every caller handle a secret. The account file
   already carries both.
+- 2026-09-23: **Interactive login removed rather than wired up.** It was
+  written and tested and nothing called it — the same shape as
+  `PluginWatch.dropped`. A worker account is provisioned with a password we
+  wrote, so the path SSO and 2FA need was never the path this uses.
 - 2026-09-23: **The endpoint uses `--listen`, not `--port`.** `--port` already
   belongs to a lane group and must follow an `--account`; two meanings for one
   flag would be a trap. `$HOST` and `$PORT` are read bare as asked, with

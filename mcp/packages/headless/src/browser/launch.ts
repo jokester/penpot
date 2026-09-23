@@ -160,12 +160,13 @@ function clearHttpCache(profileDir: string): void {
  *
  * Separate from `playwrightLaunch` because a login is not a lane: it wants no
  * injection, no workspace URL and no plugin watch, and it must close the
- * context afterwards so Chromium flushes the cookie jar to disk.
+ * context afterwards so Chromium flushes the cookie jar to disk. Always
+ * headless -- the interactive path that needed a window is gone.
  */
 export function playwrightSessions(options: LaunchOptions = {}): OpenSessionContext {
-    return async (account: AccountRef, headless: boolean): Promise<SessionContext> => {
+    return async (account: AccountRef): Promise<SessionContext> => {
         const context = await chromium.launchPersistentContext(account.profileDir, {
-            headless,
+            headless: true,
             ...(options.channel === undefined || options.channel === "" ? {} : { channel: options.channel }),
             args: [...NO_THROTTLE_ARGS, ...(options.args ?? [])],
             viewport: { width: 1440, height: 900 },
@@ -181,13 +182,6 @@ export function playwrightSessions(options: LaunchOptions = {}): OpenSessionCont
                     data: body as Record<string, unknown>,
                 });
                 return { ok: response.ok(), status: response.status(), text: () => response.text() };
-            },
-            async open(url: string) {
-                const page = context.pages()[0] ?? (await context.newPage());
-                await page.goto(url, { waitUntil: "domcontentloaded", timeout: GOTO_TIMEOUT_MS });
-            },
-            hasWindow() {
-                return context.pages().length > 0;
             },
             async close() {
                 await context.close().catch(() => undefined);

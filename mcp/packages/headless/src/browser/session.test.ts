@@ -5,7 +5,6 @@ import type { Account } from "../core/config.ts";
 import { isLauncherError } from "../core/errors.ts";
 import {
     ensureSession,
-    isSessionOnly,
     sessionStore,
     type OpenSessionContext,
     type PostResult,
@@ -27,24 +26,21 @@ const COOKIE: StoredCookie = { name: "auth-token", value: "abc", expires: 1_800_
 interface FakeOptions {
     /** Cookies present before anything happens. */
     readonly cookies?: readonly StoredCookie[];
-    /** Cookies that appear after this many polls, modelling a person logging in. */
+    /** Cookies that appear only after the login has been posted. */
     readonly appearsAfter?: number;
     readonly post?: PostResult;
-    /** Models a person closing the window. */
-    readonly closesAfter?: number;
 }
 
 function fakeContexts(options: FakeOptions = {}) {
     const state = {
-        opened: [] as { headless: boolean }[],
+        opened: 0,
         closed: 0,
         posts: [] as { url: string; body: unknown }[],
-        visited: [] as string[],
         polls: 0,
     };
 
-    const open: OpenSessionContext = async (_account, headless) => {
-        state.opened.push({ headless });
+    const open: OpenSessionContext = async () => {
+        state.opened += 1;
 
         const ctx: SessionContext = {
             async cookies() {
@@ -58,12 +54,6 @@ function fakeContexts(options: FakeOptions = {}) {
                 state.posts.push({ url, body });
                 return options.post ?? { ok: true, status: 200, text: async () => "" };
             },
-            async open(url) {
-                state.visited.push(url);
-            },
-            hasWindow() {
-                return options.closesAfter === undefined || state.polls <= options.closesAfter;
-            },
             async close() {
                 state.closed += 1;
             },
@@ -71,15 +61,14 @@ function fakeContexts(options: FakeOptions = {}) {
         return ctx;
     };
 
-    // No real waiting: the poll loop is the thing under test, not the clock.
-    return { open, state, store: sessionStore(open, async () => undefined) };
+    return { open, state, store: sessionStore(open) };
 }
 
 test("a profile with the session cookie has a session", async () => {
     const f = fakeContexts({ cookies: [COOKIE] });
 
     assert.equal(await f.store.has(ACCOUNT), true);
-    assert.deepEqual(f.state.opened, [{ headless: true }], "checking should not open a window");
+    assert.equal(f.state.opened, 1, "checking should open one context and close it");
     assert.equal(f.state.closed, 1, "the context must be closed so the jar is flushed");
 });
 
@@ -101,7 +90,7 @@ test("a password login posts through the browser, not through Node", async () =>
             body: { email: ACCOUNT.email, password: "hunter2" },
         },
     ]);
-    assert.deepEqual(f.state.opened, [{ headless: true }]);
+    assert.equal(f.state.opened, 1);
     assert.equal(f.state.closed, 1);
 });
 
@@ -134,49 +123,11 @@ test("a 200 that stores no cookie is still a failure", async () => {
     );
 });
 
-test("an interactive login opens a window and waits for the cookie", async () => {
-    const f = fakeContexts({ appearsAfter: 3 });
-    await f.store.loginInteractive(ACCOUNT, AbortSignal.timeout(5000));
-
-    assert.deepEqual(f.state.opened, [{ headless: false }], "a person needs to see the window");
-    assert.deepEqual(f.state.visited, ["http://localhost:9001/#/auth/login"]);
-    assert.ok(f.state.polls > 3, "it should have polled until the cookie appeared");
-    assert.equal(f.state.closed, 1);
-});
-
-test("a window closed before logging in is a failure, not a success", async () => {
-    // Waiting for the window to close rather than for the cookie was the
-    // original bug: giving up looked exactly like succeeding.
-    const f = fakeContexts({ cookies: [], closesAfter: 2 });
-
-    await assert.rejects(
-        () => f.store.loginInteractive(ACCOUNT, AbortSignal.timeout(5000)),
-        (err: unknown) => isLauncherError(err) && err.message.includes("window closed before")
-    );
-    assert.equal(f.state.closed, 1);
-});
-
-test("a cancelled interactive login stops waiting", async () => {
-    const control = new AbortController();
-    const f = fakeContexts({ cookies: [] });
-    control.abort();
-
-    await assert.rejects(
-        () => f.store.loginInteractive(ACCOUNT, control.signal),
-        (err: unknown) => isLauncherError(err) && err.message.includes("cancelled")
-    );
-});
-
 test("a trailing slash on the origin does not double up", async () => {
     const f = fakeContexts({ cookies: [COOKIE] });
     await f.store.loginWithPassword(ACCOUNT, AbortSignal.timeout(5000));
 
     assert.ok(!f.state.posts[0]?.url.includes("//api"), f.state.posts[0]?.url ?? "no post was made");
-});
-
-test("a session-only cookie is recognisable, because it will not survive a restart", () => {
-    assert.equal(isSessionOnly({ name: "auth-token", value: "a", expires: -1 }), true);
-    assert.equal(isSessionOnly(COOKIE), false);
 });
 
 test("a profile that already has a session is left alone", async () => {
@@ -195,8 +146,8 @@ test("a profile with no session is logged in before any lane opens", async () =>
     await ensureSession(ACCOUNT, f.store, AbortSignal.timeout(5000));
 
     assert.equal(f.state.posts.length, 1);
-    // One context to look, one to log in -- and neither opens a window.
-    assert.deepEqual(f.state.opened, [{ headless: true }, { headless: true }]);
+    // One context to look, one to log in.
+    assert.equal(f.state.opened, 2);
     assert.equal(f.state.closed, 2, "both contexts must close so the jar is flushed");
 });
 
@@ -208,7 +159,7 @@ test("no session and no password says what to do about it", async () => {
         () => ensureSession(noPassword, f.store, AbortSignal.timeout(5000)),
         (err: unknown) => {
             assert.ok(isLauncherError(err));
-            assert.ok(err.message.includes("log in once with a window"), err.message);
+            assert.ok(err.message.includes("provision the account again"), err.message);
             return true;
         }
     );

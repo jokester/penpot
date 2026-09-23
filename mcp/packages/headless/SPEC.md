@@ -600,6 +600,41 @@ state and holds no logic of its own.
 - One opt-in end-to-end smoke against the real deployment that calls
   `execute_code`, which is what `smoke.js` does today.
 
+## 13b. Diagnostics — specified, not built
+
+`mcp/packages/host/spikes/` answered three questions the launcher cannot. They
+go at cutover, and nothing replaces them yet. This is the specification, so the
+capability is not lost with the code.
+
+`--check` already reports leftovers, and the façade already distinguishes a
+plugin that never dialled from one whose socket closed. What is missing is
+everything about an account *before* a lane is attempted.
+
+**`mcp-headless doctor [--account NAME]`** — one read-only command, exit 0 when
+it finds nothing wrong, non-zero and specific when it does. It should answer, in
+this order, because each answer makes the next meaningful:
+
+1. **Configuration.** Is there a deployment? Does its `portRange` match what the
+   compose file publishes? That pair is declared twice and checked nowhere, and
+   a mismatch surfaces much later as "outside the published range".
+2. **Reachability.** Does the container answer, and how many lanes does the
+   published range allow? Is the instance's own MCP endpoint answering?
+3. **The account.** Does the profile hold a session, and does it still
+   authenticate — the old `verify` spike's question, which matters because a
+   cookie can be present and stale. Does the account have an MCP token, and does
+   that token authenticate the REST API?
+4. **The document list.** Can teams and files be listed, and how many are there?
+   An empty list with a working token means the worker was never invited.
+5. **A lane, end to end** (opt-in, because it costs 10-20 seconds and opens a
+   browser). Open one, call `execute_code`, close it — the old `smoke` spike.
+
+The old `diagnose` spike additionally dumped browser console output and the
+profile's `mcp-enabled` prop. Console capture is worth keeping as a flag; the
+profile prop is reachable through the REST API now and belongs in step 3.
+
+Nothing here needs a lane except step 5, which is what makes the command useful
+when a lane is exactly what will not start.
+
 ## 14. Decisions and remaining questions
 
 ### 14.1 Supervisor: hand-rolled — decided
@@ -623,12 +658,32 @@ dropped because it is not wanted, not because it is impossible. A
 container-launched one additionally needed crash-handler flags that a bare
 `docker run` does not supply.
 
-### 14.3 Container-launched browsers — deferred
+### 14.3 Container-launched browsers — deferred, and worth keeping described
 
-v1 launches browsers on the host with `launchPersistentContext`. The container
-path (`--browser container`, today's image-pinned browser) needs the crashpad
-flags worked out and is worth revisiting only if host Playwright drifts from the
-image often enough to matter.
+v1 launches browsers on the host with `launchPersistentContext`. The launcher
+pins `playwright` to an exact version, so the browser build is already fixed by
+the lockfile rather than by whatever is installed — which was most of the reason
+the container path existed.
+
+What it bought on top, and what would have to be rebuilt to get it back:
+
+- **The version comes from an image tag, not a lockfile plus an install step.**
+  `run-mcp-worker --browser container` ran the browser inside the pinned
+  Playwright image, overridable with `PENPOT_WORKER_IMAGE`. A fresh machine
+  needed no `pnpm exec playwright install`, and two machines could not drift.
+- **Headed still worked**, by mounting the host's X socket into the container so
+  it drew on the operator's display. That was measured working, not assumed.
+- **The browser's dependencies stayed off the host** — useful where the host is
+  not the operator's workstation.
+
+Against that: the container needs `--no-sandbox` or a suitable seccomp profile,
+the crashpad flags have to be worked out, and the profile directory has to be
+mounted so a session survives. It is worth revisiting only if the pinned
+Playwright proves awkward to install somewhere it matters.
+
+This is recorded here because `deploy/home-cluster/run-mcp-worker` is deleted at
+cutover, and its `--browser container` implementation is the only description of
+how this was made to work.
 
 ### 14.4 Port-forward supervision — deferred, and probably moot
 
