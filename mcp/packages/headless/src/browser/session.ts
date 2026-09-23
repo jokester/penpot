@@ -23,6 +23,9 @@ export interface StoredCookie {
     readonly value: string;
     /** Seconds since the epoch, or -1 for a session-only cookie. */
     readonly expires: number;
+    readonly domain?: string;
+    readonly path?: string;
+    readonly secure?: boolean;
 }
 
 /** What a reply to the login RPC looks like, narrowed to what matters. */
@@ -40,9 +43,19 @@ export interface PostResult {
  * stored cookie.
  */
 export interface SessionContext {
-    cookies(origin: string): Promise<readonly StoredCookie[]>;
+    /**
+     * Every cookie in the jar, unfiltered.
+     *
+     * Unfiltered because Playwright's own `cookies(url)` will not return a
+     * `Secure` cookie for an `http://` URL, loopback included -- so asking it
+     * about the origin reports "no session" for a session that is right there.
+     * Matching the host here instead makes that decision ours.
+     */
+    cookies(): Promise<readonly StoredCookie[]>;
     /** Posts through the browser, so Set-Cookie lands in the profile's jar. */
     post(url: string, body: unknown): Promise<PostResult>;
+    /** Puts cookies back, which is how a Secure cookie is made usable on loopback. */
+    addCookies(cookies: readonly (StoredCookie & { url?: string })[]): Promise<void>;
     close(): Promise<void>;
 }
 
@@ -75,8 +88,10 @@ export function sessionStore(open: OpenSessionContext): SessionStore {
     };
 
     const cookieOf = async (ctx: SessionContext, account: AccountRef): Promise<StoredCookie | undefined> => {
-        const origin = normalizeOrigin(account.origin);
-        return (await ctx.cookies(origin)).find((cookie) => cookie.name === COOKIE);
+        const host = hostOf(account.origin);
+        return (await ctx.cookies()).find(
+            (cookie) => cookie.name === COOKIE && (cookie.domain ?? "").replace(/^\./, "") === host
+        );
     };
 
     return {
@@ -113,10 +128,61 @@ export function sessionStore(open: OpenSessionContext): SessionStore {
                     });
                 }
                 if (signal.aborted) return;
+                await usableOnLoopback(ctx, account, cookieOf);
                 await requireCookie(ctx, account, cookieOf);
             });
         },
     };
+}
+
+/**
+ * Re-stores a `Secure` session cookie without the flag, on loopback http only.
+ *
+ * Penpot sets `Secure` whenever the deployment runs with
+ * `enable-secure-session-cookies`, which is right for its public https origin
+ * and leaves the worker path -- `http://127.0.0.1:<port>`, a node-local
+ * Service or an SSH forward -- unable to hold a session at all: the cookie is
+ * accepted into the jar and then never sent, so every request is anonymous and
+ * the lane fails ninety seconds later as a plugin that never dialled.
+ *
+ * Narrow on purpose. Only http, and only a loopback host, which is the case
+ * where `Secure` protects against nothing: the request never leaves the
+ * machine. It is the same reasoning browsers use to call loopback
+ * "potentially trustworthy" -- Playwright's cookie filter simply does not
+ * implement that carve-out. For any other host the cookie is left exactly as
+ * the server set it, because downgrading it there would be a real weakening.
+ */
+async function usableOnLoopback(
+    ctx: SessionContext,
+    account: AccountRef,
+    cookieOf: (ctx: SessionContext, account: AccountRef) => Promise<StoredCookie | undefined>
+): Promise<void> {
+    const origin = normalizeOrigin(account.origin);
+    if (!origin.startsWith("http://") || !isLoopbackHost(hostOf(origin))) return;
+
+    const cookie = await cookieOf(ctx, account);
+    if (cookie === undefined || cookie.secure !== true) return;
+
+    // Domain and path, never `url` -- Playwright takes one or the other and
+    // refuses a cookie carrying both. The pair comes straight back off the
+    // cookie the server set, so the replacement lands in the same slot.
+    await ctx.addCookies([
+        { ...cookie, secure: false, domain: cookie.domain ?? hostOf(origin), path: cookie.path ?? "/" },
+    ]);
+}
+
+/** True for the hosts that never leave this machine. */
+function isLoopbackHost(host: string): boolean {
+    return host === "localhost" || host === "::1" || host === "[::1]" || /^127\./.test(host);
+}
+
+/** The host of an origin, without the port. */
+function hostOf(origin: string): string {
+    try {
+        return new URL(normalizeOrigin(origin)).hostname;
+    } catch {
+        return origin;
+    }
 }
 
 /** Confirms the cookie landed, since a 200 with no cookie has happened. */

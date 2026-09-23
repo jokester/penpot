@@ -65,3 +65,18 @@ test("loopback is recognised, so a wider bind can be warned about", () => {
     assert.ok(!isLoopback("twlight-sparkle"));
     assert.ok(!isLoopback("192.168.100.200"));
 });
+
+test("conf.yaml beats the environment, and the flag beats the file", async () => {
+    // $PORT is ambient -- inherited from a shell or a supervisor that had its
+    // own reasons -- while the file was written for this deployment.
+    const env = { HOST: "0.0.0.0", PORT: "9999" };
+    const conf = { host: "127.0.0.1", port: 4600 };
+
+    assert.deepEqual(facadeAddress(undefined, env, conf), conf);
+    assert.deepEqual(facadeAddress({ port: 4700 }, env, conf), { host: "127.0.0.1", port: 4700 });
+    assert.deepEqual(facadeAddress(undefined, env, undefined), { host: "0.0.0.0", port: 9999 });
+});
+
+test("a file that sets only the port leaves the host to the rest", async () => {
+    assert.deepEqual(facadeAddress(undefined, {}, { port: 4600 }), { host: "127.0.0.1", port: 4600 });
+});

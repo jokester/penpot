@@ -34,8 +34,17 @@ export type Command = "tui" | "no-tui" | "check" | "help" | "version" | "provisi
  */
 export const SUBCOMMANDS = ["server", "provision-worker-user"] as const;
 
+/**
+ * The scratch document's name when nobody says otherwise.
+ *
+ * A sentinel as much as a default: `main` replaces it with one named for the
+ * worker, and an explicit --file-name is left exactly as it was typed.
+ */
+export const DEFAULT_SCRATCH = "worker-scratch";
+
 /** Everything `provision-worker-user` was told. */
 export interface ProvisionRequest {
+    /** Empty when the workers come from conf.yaml instead of the flag. */
     readonly email: string;
     readonly origin?: string;
     readonly account?: string;
@@ -100,7 +109,8 @@ provision-worker-user creates the one kind of Penpot account that has a
 password, and writes <config>/accounts/<name>.env holding it. Re-running is
 how you add a team or rewrite a lost account file.
 
-  --email ADDRESS     the worker's email. Required
+  --email ADDRESS     the worker's email. Omit to provision every worker
+                      conf.yaml names that has no account file yet
   --name NAME         the account file's name. Default: the email's local part
   --full-name TEXT    the display name in Penpot. Default: the same
   --origin URL        the Penpot instance. Default http://localhost:9001
@@ -108,8 +118,9 @@ how you add a team or rewrite a lost account file.
   --reset-password    set a new password on an account that already exists
   --mint-token        replace the account's MCP token. Destructive: the old
                       one stops working wherever it is in use
-  --file-name NAME    a scratch document to create. Default worker-scratch;
-                      pass '' for none
+  --file-name NAME    a scratch document to create. Default <name>-scratch,
+                      because the façade lists every worker's documents
+                      together; pass '' for none
 
 The password is never a flag, because a process list is public. It is read
 from $MCP_HEADLESS_WORKER_PASSWORD, then from the account file if one is
@@ -264,7 +275,7 @@ function parseProvision(argv: readonly string[], env: NodeJS.ProcessEnv): Option
     let origin: string | undefined;
     let resetPassword = false;
     let mintToken = false;
-    let fileName = "worker-scratch";
+    let fileName = DEFAULT_SCRATCH;
     const invitations: string[] = [];
 
     const valueOf = (flag: string, index: number, mayBeEmpty = false): string => {
@@ -331,8 +342,6 @@ function parseProvision(argv: readonly string[], env: NodeJS.ProcessEnv): Option
                 fail("not-configured", `unknown argument ${arg}`, { argument: arg });
         }
     }
-
-    if (email === "") fail("not-configured", "provision-worker-user needs --email", { flag: "--email" });
 
     return {
         command: "provision",

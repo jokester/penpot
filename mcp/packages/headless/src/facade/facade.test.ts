@@ -85,7 +85,7 @@ function build(over: { catalogue?: Catalogue; answers?: Record<string, CallResul
         leases,
         backend: b.backend,
         catalogue: over.catalogue ?? fakeCatalogue(),
-        account: ACCOUNT,
+        accounts: [ACCOUNT],
         staticEndpoint: STATIC_ENDPOINT,
     });
     return { facade, leases, ...l, ...b };
@@ -294,5 +294,44 @@ test("every document tool routes to the lane, not the static endpoint", async ()
     assert.ok(
         f.calls.every((c) => c.endpoint.startsWith("http://127.0.0.1:")),
         "document tools must never go to the instance's own endpoint"
+    );
+});
+
+test("two documents with the same name are told apart by their ids", async () => {
+    // The pool makes this likely rather than exotic: every worker is
+    // provisioned with a scratch document, and they land in each worker's own
+    // default team, which is also called Default.
+    // Real ids, from two documents provisioning created seconds apart. They
+    // are identical for 28 characters, which is why the suffix is used.
+    const twins: DocumentChoice[] = [
+        {
+            fileId: "a5ca2f23-cfad-8091-8008-af1cd3f4cd2c",
+            teamId: "t1",
+            fileName: "scratch",
+            teamName: "Default",
+            modifiedAt: "",
+        },
+        {
+            fileId: "a5ca2f23-cfad-8091-8008-af1cd4a03b9d",
+            teamId: "t2",
+            fileName: "scratch",
+            teamName: "Default",
+            modifiedAt: "",
+        },
+    ];
+    const f = build({ catalogue: fakeCatalogue({ documents: twins, problem: null }) });
+
+    const listed = await f.facade.listDocuments(AbortSignal.timeout(1_000));
+
+    assert.deepEqual(listed.documents, ["Default / scratch (d3f4cd2c)", "Default / scratch (d4a03b9d)"]);
+});
+
+test("a document with a unique name keeps it", async () => {
+    const f = build();
+    const listed = await f.facade.listDocuments(AbortSignal.timeout(1_000));
+
+    assert.ok(
+        listed.documents.every((name) => !/\([0-9a-f]{8}\)/.test(name)),
+        listed.documents.join(", ")
     );
 });

@@ -30,7 +30,11 @@ const account = (name: string, withDocument: boolean): Account => ({
 });
 
 function settings(...accounts: Account[]): Settings {
-    return { accounts: new Map(accounts.map((a) => [a.name, a])), tui: { columns: DEFAULT_COLUMNS, statusBar: true } };
+    return {
+        accounts: new Map(accounts.map((a) => [a.name, a])),
+        tui: { columns: DEFAULT_COLUMNS, statusBar: true },
+        workers: [],
+    };
 }
 
 const ONE = settings(account("mcp-worker", true));

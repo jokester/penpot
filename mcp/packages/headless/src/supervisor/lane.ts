@@ -129,7 +129,7 @@ async function open(
     notePid(server.pid);
     try {
         onEvent({ state: "opening", detail: `waiting for ${ports.local.http} to answer` });
-        const exposure = await backend.expose(ports.local.http, signal);
+        const exposure = await backend.expose(ports.local, signal);
         try {
             onEvent({ state: "opening", detail: "opening the workspace" });
             const lease = await deps.pool.lease(

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import type { NotReady } from "../browser/page.ts";
 import type { BrowserKey, BrowserPool, Lease, LeaseInit } from "../browser/pool.ts";
+import type { PortPair } from "../core/ports.ts";
 import type { AccountRef, DocumentRef } from "../core/target.ts";
 import type { ExecBackend, ExecResult, Exposure, RemoteProcess } from "../exec/backend.ts";
 import { FakeExecBackend, type FakeOptions } from "../exec/fake.ts";
@@ -57,9 +58,9 @@ class TracingBackend implements ExecBackend {
     listening(): Promise<number[]> {
         return this.inner.listening();
     }
-    async expose(port: number, signal: AbortSignal): Promise<Exposure> {
-        const exposure = await this.inner.expose(port, signal);
-        this.#trace.note(`expose:${port}`);
+    async expose(ports: PortPair, signal: AbortSignal): Promise<Exposure> {
+        const exposure = await this.inner.expose(ports, signal);
+        this.#trace.note(`expose:${ports.http}`);
         return {
             url: exposure.url,
             close: async () => {

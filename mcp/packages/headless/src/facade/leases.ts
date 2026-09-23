@@ -34,7 +34,13 @@ export interface LaneHandle {
 /** Making and unmaking lanes, so the registry can be tested without one. */
 export interface LaneSource {
     /** Opens a lane on a document and resolves once its plugin has connected. */
-    open(document: DocumentRef, signal: AbortSignal): Promise<LaneHandle>;
+    /**
+     * Opens a lane, using one of `eligible` if the source draws on a pool.
+     *
+     * The names are the workers that can actually see the document. An empty
+     * list means "any", which is what a source with one account always gets.
+     */
+    open(document: DocumentRef, eligible: readonly string[], signal: AbortSignal): Promise<LaneHandle>;
     close(id: string): Promise<void>;
     /**
      * Clears the lane's `storage`, so the next holder sees nothing of the last.
@@ -113,13 +119,23 @@ export class LeaseRegistry {
      * the first. That keeps one agent from taking the whole budget, and makes
      * the held set something a person can reason about.
      */
-    async acquire(sessionId: string, document: DocumentRef, signal: AbortSignal): Promise<Lease> {
-        const run = this.#gate.then(() => this.#acquireOne(sessionId, document, signal));
+    async acquire(
+        sessionId: string,
+        document: DocumentRef,
+        signal: AbortSignal,
+        eligible: readonly string[] = []
+    ): Promise<Lease> {
+        const run = this.#gate.then(() => this.#acquireOne(sessionId, document, signal, eligible));
         this.#gate = run.catch(() => undefined);
         return await run;
     }
 
-    async #acquireOne(sessionId: string, document: DocumentRef, signal: AbortSignal): Promise<Lease> {
+    async #acquireOne(
+        sessionId: string,
+        document: DocumentRef,
+        signal: AbortSignal,
+        eligible: readonly string[]
+    ): Promise<Lease> {
         const existing = this.#slots.get(document.fileId);
 
         if (existing?.holder === sessionId) return { document: existing.document, lane: existing.lane };
@@ -142,7 +158,7 @@ export class LeaseRegistry {
 
         await this.#makeRoom(document);
 
-        const lane = await this.#lanes.open(document, signal);
+        const lane = await this.#lanes.open(document, eligible, signal);
         const slot: Slot = {
             document,
             lane,

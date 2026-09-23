@@ -19,7 +19,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import type { Deployment } from "../core/config.ts";
 import { fail } from "../core/errors.ts";
 import type { Container, ExecBackend, ExecResult, Exposure, RemoteProcess, RunOptions } from "./backend.ts";
-import { portMap, type PortMap } from "../core/ports.ts";
+import { portMap, type PortMap, type PortPair } from "../core/ports.ts";
 import { parseListeningPorts } from "./procnet.ts";
 import { reachable, sleep } from "./reach.ts";
 
@@ -211,18 +211,21 @@ export class KubectlBackend implements ExecBackend {
      * per lane -- which is why it is not the default and why closing it is not
      * optional.
      */
-    async expose(port: number, signal: AbortSignal): Promise<Exposure> {
-        const forward = this.#exposure === "port-forward" ? await this.#forward(port, signal) : null;
+    async expose(ports: PortPair, signal: AbortSignal): Promise<Exposure> {
+        const forward = this.#exposure === "port-forward" ? await this.#forward(ports, signal) : null;
 
         try {
-            await this.#waitReachable(port, signal);
+            // Only the HTTP half is probed. The WebSocket answers no HTTP
+            // request to prove itself with, and under port-forward it came up
+            // in the same child as the half that did answer.
+            await this.#waitReachable(ports.http, signal, forward?.said);
         } catch (err) {
             await forward?.close();
             throw err;
         }
 
         return {
-            url: `http://${this.#host}:${port}/mcp`,
+            url: `http://${this.#host}:${ports.http}/mcp`,
             close: forward === null ? async () => undefined : forward.close,
         };
     }
@@ -237,10 +240,50 @@ export class KubectlBackend implements ExecBackend {
      * 127.0.0.1 goes to the other thing. Measured: docker-proxy from an
      * unrelated stack held 4601 and the forward came up anyway.
      */
-    async #forward(local: number, signal: AbortSignal): Promise<{ close: () => Promise<void> }> {
+    async #forward(local: PortPair, signal: AbortSignal): Promise<{ close: () => Promise<void>; said: string[] }> {
         const pod = await this.#pod("mcp", signal);
-        const upstream = this.#ports.upstream(local);
-        const child = this.#spawn(["port-forward", "--address", this.#host, pod, `${local}:${upstream}`]);
+        const upstream = { http: this.#ports.upstream(local.http), ws: this.#ports.upstream(local.ws) };
+
+        // Before spawning, not after. `kubectl port-forward` dials the target
+        // inside the pod's network namespace as soon as it starts, and a
+        // refusal is fatal to it rather than something it retries:
+        //
+        //   failed to connect to localhost:4601 inside namespace "...":
+        //   dial tcp4 127.0.0.1:4601: connect: connection refused
+        //   error: lost connection to pod
+        //
+        // `start` resolves when the wrapper shell prints its pid, which is
+        // before node has bound anything, so without this the forward is
+        // always spawned into that window, dies, and leaves the lane waiting
+        // thirty seconds on a local port nothing is behind.
+        await this.#waitListening(upstream, signal);
+
+        // Both pairs in one child, because both have to arrive. The agent
+        // connects to the HTTP port and the browser dials the WebSocket, and a
+        // lane with only the first forwarded opens, answers, and never becomes
+        // ready -- the plugin dials a local port with nothing behind it and
+        // the socket closes again.
+        const child = this.#spawn([
+            "port-forward",
+            "--address",
+            this.#host,
+            pod,
+            `${local.http}:${upstream.http}`,
+            `${local.ws}:${upstream.ws}`,
+        ]);
+
+        // Kept for the failure message. A forward that comes up and then dies
+        // -- the pod rolled, the API server hiccuped -- leaves a lane waiting
+        // on a port nothing is behind, and without this the only thing anyone
+        // could say about it was "nothing answers".
+        const said: string[] = [];
+        for (const stream of [child.stdout, child.stderr]) {
+            stream?.setEncoding("utf8");
+            stream?.on("data", (chunk: string) => {
+                for (const line of chunk.split("\n")) if (line.trim() !== "") said.push(line.trim());
+            });
+        }
+        child.on("exit", (code) => said.push(`port-forward exited with ${code}`));
 
         let closed = false;
         const close = async () => {
@@ -265,10 +308,17 @@ export class KubectlBackend implements ExecBackend {
 
                 signal.addEventListener("abort", onAbort, { once: true });
                 child.on("error", (err) => done(err));
-                child.on("exit", (code) => done(new Error(`port-forward exited with ${code}`)));
-                child.stdout?.setEncoding("utf8");
+                const onExit = (code: number | null) => done(new Error(`port-forward exited with ${code}`));
+                child.on("exit", onExit);
+                // Two lines, one per pair. Waiting for both means a lane is
+                // never handed a forward that is only half up.
+                let up = 0;
                 child.stdout?.on("data", (chunk: string) => {
-                    if (chunk.includes("Forwarding from")) done(null);
+                    up += chunk.split("\n").filter((line) => line.includes("Forwarding from")).length;
+                    if (up >= 2) {
+                        child.removeListener("exit", onExit);
+                        done(null);
+                    }
                 });
             });
         } catch (err) {
@@ -276,26 +326,51 @@ export class KubectlBackend implements ExecBackend {
             throw err;
         }
 
-        // A forward that dies later must not leave a lane believing in it. The
-        // lane finds out at its next call either way, but a silent dead
-        // forward is the failure that looks like the server hanging.
-        child.removeAllListeners("exit");
-        return { close };
+        return { close, said };
     }
 
-    async #waitReachable(port: number, signal: AbortSignal): Promise<void> {
+    /** Waits until the container itself has both ports open. */
+    async #waitListening(upstream: PortPair, signal: AbortSignal): Promise<void> {
+        const deadline = Date.now() + this.#reachableTimeoutMs;
+        const wanted = [upstream.http, upstream.ws];
+
+        for (;;) {
+            if (signal.aborted) {
+                fail("unreachable", `gave up waiting for ${wanted.join(" and ")} in the pod`, { port: upstream.http });
+            }
+            const open = await this.listening();
+            if (wanted.every((port) => open.includes(port))) return;
+            if (Date.now() > deadline) {
+                const missing = wanted.filter((port) => !open.includes(port));
+                fail(
+                    "unreachable",
+                    `nothing is listening on ${missing.join(" or ")} inside the pod after ` +
+                        `${this.#reachableTimeoutMs} ms`,
+                    { port: missing[0] ?? upstream.http }
+                );
+            }
+            await sleep(500, signal);
+        }
+    }
+
+    async #waitReachable(port: number, signal: AbortSignal, said?: readonly string[]): Promise<void> {
         const deadline = Date.now() + this.#reachableTimeoutMs;
         for (;;) {
             if (signal.aborted) fail("unreachable", `gave up waiting for port ${port}`, { port });
             if (await reachable(this.#host, port)) return;
             if (Date.now() > deadline) {
+                const why =
+                    this.#exposure === "none"
+                        ? `; with exposure "none" the port must already be node-local (hostPort or a node-local Service)`
+                        : said === undefined || said.length === 0
+                          ? ""
+                          : `; port-forward said: ${said.slice(-3).join(" / ")}`;
                 fail(
                     "unreachable",
-                    `nothing answers on ${this.#host}:${port} after ${this.#reachableTimeoutMs} ms` +
-                        (this.#exposure === "none"
-                            ? `; with exposure "none" the port must already be node-local (hostPort or a node-local Service)`
-                            : ""),
-                    { port }
+                    `nothing answers on ${this.#host}:${port} after ${this.#reachableTimeoutMs} ms${why}`,
+                    {
+                        port,
+                    }
                 );
             }
             await sleep(250, signal);

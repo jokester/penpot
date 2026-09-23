@@ -6,6 +6,7 @@
 // rewrite.
 
 import type { Deployment } from "../core/config.ts";
+import type { PortPair } from "../core/ports.ts";
 
 /** What a short command left behind. */
 export interface ExecResult {
@@ -86,8 +87,17 @@ export interface ExecBackend {
     /** Ports listening inside the container, IPv4 and IPv6 alike (invariant 4). */
     listening(): Promise<number[]>;
 
-    /** Makes an in-container port reachable locally, or proves that it already is. */
-    expose(port: number, signal: AbortSignal): Promise<Exposure>;
+    /**
+     * Makes a lane's ports reachable locally, or proves that they already are.
+     *
+     * Both of them, because a lane has two and they are reached by different
+     * things: the agent connects to the HTTP port and the browser dials the
+     * WebSocket. Under compose and under hostPorts they are published
+     * together and this only verifies; under `port-forward` both need
+     * forwarding, and forwarding only the HTTP one gives a lane that opens,
+     * answers, and never becomes ready.
+     */
+    expose(ports: PortPair, signal: AbortSignal): Promise<Exposure>;
 }
 
 /** Builds the backend a deployment describes. */

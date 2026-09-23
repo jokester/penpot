@@ -7,6 +7,7 @@
 // is the only place that does.
 
 import { DEFAULT_COLUMNS, parseColumns, type ColumnName } from "./columns.ts";
+import { CONF_FILE, parseConf, type McpBackendConf, type WorkerUser } from "./conf.ts";
 import { fail } from "./errors.ts";
 import { portMap, type PortRange } from "./ports.ts";
 import { parseWorkspaceUrl, type AccountRef, type DocumentRef } from "./target.ts";
@@ -84,6 +85,17 @@ export interface Settings {
     readonly deployment?: Deployment;
     readonly accounts: ReadonlyMap<string, Account>;
     readonly tui: TuiSettings;
+    /**
+     * The worker pool, in the order `conf.yaml` names it.
+     *
+     * Empty when there is no such file, and then every account found on disk
+     * is a worker -- which is what the launcher did before the pool existed.
+     */
+    readonly workers: readonly WorkerUser[];
+    /** Where the façade listens, when the file says. Flags still win. */
+    readonly facade?: { readonly host?: string; readonly port?: number };
+    /** The instance an unprovisioned worker belongs to. */
+    readonly penpotUrl?: string;
 }
 
 /** Where a published port appears when the deployment does not say. */
@@ -103,7 +115,6 @@ const ACCOUNTS_DIR = "accounts";
  * so.
  */
 export function load(dir: string, env: NodeJS.ProcessEnv, io: ConfigIo): Settings {
-    const json = io.read(join(dir, DEPLOYMENT_FILE));
     const accountsDir = join(dir, ACCOUNTS_DIR);
 
     const accounts = new Map<string, Account>();
@@ -116,7 +127,47 @@ export function load(dir: string, env: NodeJS.ProcessEnv, io: ConfigIo): Setting
     }
 
     const tui = parseTui(io.read(join(dir, TUI_FILE)));
-    return json === null ? { accounts, tui } : { deployment: parseDeployment(json, dir), accounts, tui };
+
+    // conf.yaml describes the whole deployment and deployment.json describes
+    // one part of it, so where both speak the YAML wins -- but the JSON is
+    // still read, because a configuration that predates the YAML keeps working
+    // without being rewritten.
+    const yaml = io.read(join(dir, CONF_FILE));
+    const conf = yaml === null ? null : parseConf(yaml, CONF_FILE);
+    const json = io.read(join(dir, DEPLOYMENT_FILE));
+
+    const deployment =
+        conf?.mcpBackend !== undefined
+            ? deploymentOf(conf.mcpBackend, dir)
+            : json === null
+              ? undefined
+              : parseDeployment(json, dir);
+
+    return {
+        ...(deployment === undefined ? {} : { deployment }),
+        accounts,
+        tui,
+        workers: conf?.workerUsers ?? [],
+        ...(conf?.facade === undefined ? {} : { facade: conf.facade }),
+        ...(conf?.penpotUrl === undefined ? {} : { penpotUrl: conf.penpotUrl }),
+    };
+}
+
+/** The YAML's backend block, as the rest of the launcher already understands it. */
+export function deploymentOf(conf: McpBackendConf, configDir: string): Deployment {
+    const common = {
+        exposure: conf.exposure,
+        host: conf.hostname,
+        portRange: conf.portRange,
+        configDir,
+        ...(conf.upstreamPortRange === undefined ? {} : { upstreamPortRange: conf.upstreamPortRange }),
+    } as const;
+    portMap(conf.portRange, conf.upstreamPortRange);
+
+    if (conf.type === "kubectl") {
+        return { backend: "kubectl", ...common, kubectl: conf.kubectl as Deployment["kubectl"] };
+    }
+    return { backend: "compose", ...common, compose: conf.dockerCompose as Deployment["compose"] };
 }
 
 /**

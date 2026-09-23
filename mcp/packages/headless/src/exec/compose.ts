@@ -11,6 +11,7 @@ import type { Deployment } from "../core/config.ts";
 import { fail } from "../core/errors.ts";
 import { parseListeningPorts } from "./procnet.ts";
 import { reachable, sleep } from "./reach.ts";
+import type { PortPair } from "../core/ports.ts";
 import type { ExecBackend, ExecResult, Exposure, RemoteProcess, RunOptions } from "./backend.ts";
 
 /** How long to keep proving a freshly started port is reachable, by default. */
@@ -168,7 +169,11 @@ export class ComposeBackend implements ExecBackend {
      * has only just been started, so the first few attempts are expected to
      * fail.
      */
-    async expose(port: number, signal: AbortSignal): Promise<Exposure> {
+    async expose(ports: PortPair, signal: AbortSignal): Promise<Exposure> {
+        // Only the HTTP port is probed: compose publishes the whole range at
+        // once, so a pair is reachable or neither is, and the WebSocket half
+        // answers no HTTP request to prove it with.
+        const port = ports.http;
         const deadline = Date.now() + this.#reachableTimeoutMs;
 
         for (;;) {

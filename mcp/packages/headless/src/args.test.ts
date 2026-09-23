@@ -155,11 +155,14 @@ test("a subcommand nobody has heard of is refused naming the ones that exist", a
     );
 });
 
-test("provisioning needs an email and says so", async () => {
-    assert.throws(
-        () => parseArgs(["provision-worker-user"], ENV),
-        (err: unknown) => isLauncherError(err) && /--email/.test(err.message)
-    );
+test("provisioning with no email means the workers conf.yaml names", async () => {
+    // Which workers those are is not knowable here: it needs the file. So the
+    // parser accepts the absence and main decides, which is also where the
+    // "there are none left to provision" message can name the file.
+    const options = parseArgs(["provision-worker-user"], ENV);
+
+    assert.equal(options.command, "provision");
+    assert.equal(options.provision?.email, "");
 });
 
 test("provisioning defaults the account name to the email's local part", async () => {

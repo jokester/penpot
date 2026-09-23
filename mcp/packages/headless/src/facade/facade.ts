@@ -66,7 +66,14 @@ export interface FacadeDeps {
     readonly leases: LeaseRegistry;
     readonly backend: Backend;
     readonly catalogue: Catalogue;
-    readonly account: Account;
+    /**
+     * The worker pool, in preference order.
+     *
+     * The façade asks every one of them what it can see, because two workers
+     * need not be in the same teams -- and then a lane is opened by a worker
+     * that can actually see the document, rather than by whichever was free.
+     */
+    readonly accounts: readonly Account[];
     /**
      * The instance's own MCP endpoint, where static tools go.
      *
@@ -74,6 +81,37 @@ export interface FacadeDeps {
      * agent makes cannot fail for want of a document.
      */
     readonly staticEndpoint: string;
+}
+
+/**
+ * Makes every document's label unique, by adding the start of its id.
+ *
+ * Two files can share a name in one team, and the pool makes that likelier:
+ * every worker is provisioned with a scratch document. Left alone, both
+ * render as the same row, `resolveDocument` refuses the ambiguity, and the
+ * refusal lists the same words twice -- true, and no help at all.
+ */
+function disambiguate<T extends { choice: DocumentChoice }>(seen: Map<string, T>): Map<string, T> {
+    const counts = new Map<string, number>();
+    for (const entry of seen.values()) {
+        const label = describeChoice(entry.choice);
+        counts.set(label, (counts.get(label) ?? 0) + 1);
+    }
+
+    for (const entry of seen.values()) {
+        if ((counts.get(describeChoice(entry.choice)) ?? 0) < 2) continue;
+        // The END of the id, not the start. Penpot's file ids are time-ordered
+        // with the entropy last: two documents created seconds apart came back
+        // as a5ca2f23-cfad-8091-8008-af1cd3f4cd2c and
+        // a5ca2f23-cfad-8091-8008-af1cd4a03b9d, identical for 28 characters.
+        // A leading slice disambiguates nothing at all.
+        const short = entry.choice.fileId.slice(-8);
+        (entry as { choice: DocumentChoice }).choice = {
+            ...entry.choice,
+            fileName: `${entry.choice.fileName} (${short})`,
+        };
+    }
+    return seen;
 }
 
 /**
@@ -108,15 +146,20 @@ export function resolveDocument(query: string, documents: readonly DocumentChoic
 /** The façade's behaviour, with no transport attached. */
 export class Facade {
     readonly #deps: FacadeDeps;
+    /** Why a worker's list was empty or stale, from the last look. */
+    #problem: string | null = null;
 
     constructor(deps: FacadeDeps) {
         this.#deps = deps;
     }
 
-    /** Every document the account can drive, by name. */
+    /** Every document any worker can drive, by name. */
     async listDocuments(signal: AbortSignal): Promise<{ documents: readonly string[]; problem: string | null }> {
-        const result = await this.#deps.catalogue.forAccount(this.#deps.account, signal);
-        return { documents: result.documents.map(describeChoice), problem: result.problem };
+        const seen = await this.#visible(signal);
+        return {
+            documents: [...seen.values()].map((entry) => describeChoice(entry.choice)),
+            problem: seen.size === 0 ? (this.#problem ?? "no worker can see any documents") : null,
+        };
     }
 
     /**
@@ -126,9 +169,9 @@ export class Facade {
      * then a slow first call reads the second as a hang.
      */
     async connectDoc(sessionId: string, query: string, signal: AbortSignal): Promise<Connected> {
-        const choice = await this.#resolve(query, signal);
+        const { choice, eligible } = await this.#resolve(query, signal);
         const document = documentRefOf(choice);
-        const lease = await this.#deps.leases.acquire(sessionId, document, signal);
+        const lease = await this.#deps.leases.acquire(sessionId, document, signal, eligible);
 
         return {
             document: describeChoice(choice),
@@ -189,12 +232,43 @@ export class Facade {
         return { ...ran.value, queuedBehind: ran.queuedBehind };
     }
 
-    async #resolve(query: string, signal: AbortSignal): Promise<DocumentChoice> {
-        const result = await this.#deps.catalogue.forAccount(this.#deps.account, signal);
-        if (result.documents.length === 0) {
-            fail("not-configured", result.problem ?? `${this.#deps.account.name} has no documents`, {});
+    async #resolve(query: string, signal: AbortSignal): Promise<{ choice: DocumentChoice; eligible: string[] }> {
+        const seen = await this.#visible(signal);
+        if (seen.size === 0) {
+            fail("not-configured", this.#problem ?? "no worker can see any documents", {});
         }
-        return resolveDocument(query, result.documents);
+
+        const choice = resolveDocument(
+            query,
+            [...seen.values()].map((entry) => entry.choice)
+        );
+        return { choice, eligible: seen.get(choice.fileId)?.accounts ?? [] };
+    }
+
+    /**
+     * Every document the pool can reach, and which workers can reach each.
+     *
+     * The union rather than one worker's view: a document only worker-b was
+     * invited to is still drivable, and listing only worker-a's would hide it.
+     * Deduplicated by file id, so a document two workers share appears once.
+     */
+    async #visible(signal: AbortSignal): Promise<Map<string, { choice: DocumentChoice; accounts: string[] }>> {
+        const seen = new Map<string, { choice: DocumentChoice; accounts: string[] }>();
+        const problems: string[] = [];
+
+        for (const account of this.#deps.accounts) {
+            const result = await this.#deps.catalogue.forAccount(account, signal);
+            if (result.problem !== null) problems.push(`${account.name}: ${result.problem}`);
+
+            for (const choice of result.documents) {
+                const entry = seen.get(choice.fileId);
+                if (entry === undefined) seen.set(choice.fileId, { choice, accounts: [account.name] });
+                else entry.accounts.push(account.name);
+            }
+        }
+
+        this.#problem = problems.length === 0 ? null : problems.join("; ");
+        return disambiguate(seen);
     }
 
     /**

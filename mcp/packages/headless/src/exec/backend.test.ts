@@ -26,7 +26,7 @@ execBackendContract("fake", async (): Promise<ContractHarness> => {
             argv: ["node", "index.js"],
             env: { PENPOT_MCP_SERVER_PORT: String(port), PENPOT_MCP_WEBSOCKET_PORT: String(port + 1) },
         }),
-        freePort: async () => allocate(RANGE, await backend.listening()).http,
+        freePort: async () => allocate(RANGE, await backend.listening()),
         upstreamOf: (port) => port,
         deadPort: () => 4607,
         cleanup: async (pids) => {
@@ -44,7 +44,7 @@ test("the fake reports ports a previous run left behind", async () => {
 
 test("the fake counts exposures, so a leak is visible to a test", async () => {
     const backend = new FakeExecBackend({ listening: [4601] });
-    const exposure = await backend.expose(4601, AbortSignal.timeout(1000));
+    const exposure = await backend.expose({ http: 4601, ws: 4602 }, AbortSignal.timeout(1000));
 
     assert.equal(backend.openExposures, 1);
     await exposure.close();
@@ -146,16 +146,22 @@ if (E2E) {
 
         return {
             backend,
+            // Both ports, like a real lane: exposure forwards the pair and
+            // waits for both to be listening before it does.
             serverFor: (local) => ({
                 argv: [
                     "node",
                     "-e",
-                    "require('node:http').createServer((q, s) => s.end('ok'))" +
-                        ".listen(Number(process.env.PENPOT_MCP_SERVER_PORT), '0.0.0.0')",
+                    "const h = require('node:http');" +
+                        "h.createServer((q, s) => s.end('ok')).listen(Number(process.env.PENPOT_MCP_SERVER_PORT), '0.0.0.0');" +
+                        "h.createServer((q, s) => s.end('ok')).listen(Number(process.env.PENPOT_MCP_WEBSOCKET_PORT), '0.0.0.0');",
                 ],
                 // 0.0.0.0, not loopback: a lane on the pod's own loopback is
                 // invisible to portmap and to port-forward alike.
-                env: { PENPOT_MCP_SERVER_PORT: String(local + OFFSET) },
+                env: {
+                    PENPOT_MCP_SERVER_PORT: String(local + OFFSET),
+                    PENPOT_MCP_WEBSOCKET_PORT: String(local + OFFSET + 1),
+                },
             }),
             // `listening` answers in the pod's port space; allocation happens
             // in the host's, so the busy list is translated down first.
@@ -163,7 +169,7 @@ if (E2E) {
                 allocate(
                     LOCAL_RANGE,
                     (await backend.listening()).map((port) => port - OFFSET)
-                ).http,
+                ),
             upstreamOf: (port) => port + OFFSET,
             deadPort: () => LOCAL_RANGE.hi,
             cleanup: async (pids) => {

@@ -10,8 +10,9 @@ import { randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { HELP, parseArgs, type LaneRequest, type Options } from "./args.ts";
-import { load, type ConfigIo, type Settings } from "./core/config.ts";
+import { DEFAULT_SCRATCH, HELP, parseArgs, type LaneRequest, type Options, type ProvisionRequest } from "./args.ts";
+import { load, type Account, type ConfigIo, type Settings } from "./core/config.ts";
+import type { WorkerUser } from "./core/conf.ts";
 import { isLauncherError } from "./core/errors.ts";
 import { flavourOf, playwrightLaunch, playwrightSessions } from "./browser/launch.ts";
 import { LeasingPool } from "./browser/pool.ts";
@@ -84,7 +85,7 @@ async function dispatch(options: Options, settings: Settings, env: NodeJS.Proces
     const portRange = settings.deployment?.portRange ?? { lo: 4601, hi: 4608 };
 
     if (options.command === "check") return await check(settings, backend, portRange, io);
-    if (options.command === "provision") return await provision(options, backend, env, io);
+    if (options.command === "provision") return await provision(options, settings, backend, env, io);
 
     const pool = new LeasingPool(playwrightLaunch(launchOptions(env)));
     const map = portMap(portRange, settings.deployment?.upstreamPortRange);
@@ -155,13 +156,38 @@ async function serve(
     env: NodeJS.ProcessEnv,
     io: Io
 ): Promise<Serving | null> {
-    const account = [...settings.accounts.values()][0];
-    if (account === undefined) {
-        io.err.write("no accounts configured, so the MCP endpoint is not opened; see --help\n");
+    const configured = workerPool(settings);
+    if (configured.length === 0) {
+        io.err.write(unprovisioned(settings));
         return null;
     }
-    if (account.mcpToken === undefined) {
-        io.err.write(`${account.name} has no MCP token, so the MCP endpoint is not opened\n`);
+
+    // Once per worker, before any lane wants one. A profile with no session
+    // opens the workspace on a login page, so the plugin never dials and the
+    // lane fails ninety seconds later as a timeout -- which says nothing about
+    // the password that was never used. Doing it here also means the pool is
+    // the workers that actually work, rather than the ones that were listed.
+    const accounts: Account[] = [];
+    const store = sessionStore(playwrightSessions(launchOptions(env)));
+    for (const account of configured) {
+        try {
+            await ensureSession(account, store, AbortSignal.timeout(90_000));
+            accounts.push(account);
+        } catch (err) {
+            io.err.write(`${account.name} cannot sign in, so it is not in the pool: ${message(err)}\n`);
+        }
+    }
+    if (accounts.length === 0) {
+        io.err.write("no worker could sign in, so the MCP endpoint is not opened\n");
+        return null;
+    }
+
+    // The static tools go to the instance's own endpoint, which is routed by a
+    // token. Any worker's will do, so the first one that has one is used and
+    // the rest are only ever lanes.
+    const routed = accounts.find((candidate) => candidate.mcpToken !== undefined);
+    if (routed?.mcpToken === undefined) {
+        io.err.write(`no worker has an MCP token, so the MCP endpoint is not opened\n`);
         return null;
     }
 
@@ -169,20 +195,20 @@ async function serve(
     const backend = new SdkBackend();
     const facade = new Facade({
         leases: new LeaseRegistry(
-            supervisorLanes(supervisor, backend, { account, flavour: flavourOf(launchOptions(env)) }),
-            { capacity: laneCapacity(portRange) }
+            supervisorLanes(supervisor, backend, { accounts, flavour: flavourOf(launchOptions(env)) }),
+            { capacity: laneCapacity(portRange, accounts.length) }
         ),
         backend,
         catalogue: catalogue(penpotApi()),
-        account,
+        accounts,
         // The instance's own endpoint answers the tools that need no document,
         // so an agent's first call cannot fail for want of one.
-        staticEndpoint: `${normalizeOrigin(account.origin)}/mcp/stream?userToken=${encodeURIComponent(account.mcpToken)}`,
+        staticEndpoint: `${normalizeOrigin(routed.origin)}/mcp/stream?userToken=${encodeURIComponent(routed.mcpToken)}`,
     });
 
     const serving = await serveFacade({
         facade,
-        address: facadeAddress(options.listen, env),
+        address: facadeAddress(options.listen, env, settings.facade),
         log: (line) => io.out.write(`${line}\n`),
     });
 
@@ -203,6 +229,7 @@ async function serve(
  */
 async function provision(
     options: Options,
+    settings: Settings,
     backend: ExecBackend | undefined,
     env: NodeJS.ProcessEnv,
     io: Io
@@ -214,34 +241,103 @@ async function provision(
         return 1;
     }
 
-    const local = request.email.split("@")[0] ?? request.email;
-    const report = await provisionWorker(
-        {
-            email: request.email,
-            origin: request.origin ?? "http://localhost:9001",
-            account: request.account ?? local,
-            fullName: request.fullName ?? request.account ?? local,
-            invitations: request.invitations,
-            resetPassword: request.resetPassword,
-            mintToken: request.mintToken,
-            fileName: request.fileName,
-        },
-        {
-            admin: workerAdmin(backend),
-            api: provisioningApi(),
-            tokens: penpotApi(),
-            io: io.config ?? nodeConfigIo,
-            accountsDir: `${options.configDir}/accounts`,
-            write: io.write ?? writeSecret,
-            log: (line) => io.out.write(`${line}\n`),
-            newPassword: () => randomBytes(18).toString("base64url"),
-            env,
-        }
-    );
+    const wanted = targets(request, settings);
+    if (wanted.length === 0) {
+        io.err.write(
+            request.email === ""
+                ? `no --email, and no workers left to provision in ${options.configDir}/conf.yaml\n`
+                : "provision-worker-user needs --email\n"
+        );
+        return 2;
+    }
 
-    io.out.write(`\nthe account is named ${report.path.replace(/.*\//, "").replace(/\.env$/, "")}; `);
-    io.out.write("it appears in the TUI's Account field and in --account\n");
+    const deps = {
+        admin: workerAdmin(backend),
+        api: provisioningApi(),
+        tokens: penpotApi(),
+        io: io.config ?? nodeConfigIo,
+        accountsDir: `${options.configDir}/accounts`,
+        write: io.write ?? writeSecret,
+        log: (line: string) => io.out.write(`${line}\n`),
+        newPassword: () => randomBytes(18).toString("base64url"),
+        env,
+    };
+
+    const origin = request.origin ?? settings.penpotUrl ?? "http://localhost:9001";
+    for (const target of wanted) {
+        if (wanted.length > 1) io.out.write(`\n--- ${target.name}\n`);
+        await provisionWorker(
+            {
+                email: target.email,
+                origin,
+                account: target.name,
+                fullName: target.fullName ?? target.name,
+                invitations: request.invitations,
+                resetPassword: request.resetPassword,
+                mintToken: request.mintToken,
+                // Named for the worker, because every worker gets one and the
+                // façade lists the pool's documents together: two files called
+                // "worker-scratch" are two rows an agent cannot tell apart.
+                fileName: request.fileName === DEFAULT_SCRATCH ? `${target.name}-scratch` : request.fileName,
+            },
+            deps
+        );
+    }
+
+    const named = wanted.map((target) => target.name).join(", ");
+    io.out.write(`\nprovisioned ${named}; they appear in the TUI's Account field and in --account\n`);
     return 0;
+}
+
+/**
+ * Which workers to provision: the one named, or the ones still missing.
+ *
+ * With no `--email` this is "finish the job the file describes", so a worker
+ * that already has an account file is skipped rather than re-provisioned --
+ * re-running is safe but not free, and the common case is adding the fourth
+ * worker to a pool of three.
+ */
+function targets(request: ProvisionRequest, settings: Settings): WorkerUser[] {
+    if (request.email !== "") {
+        const local = request.email.split("@")[0] ?? request.email;
+        const name = request.account ?? local;
+        return [
+            {
+                name,
+                email: request.email,
+                ...(request.fullName === undefined ? {} : { fullName: request.fullName }),
+            },
+        ];
+    }
+    return settings.workers.filter((worker) => !settings.accounts.has(worker.name));
+}
+
+/**
+ * The workers the façade may draw on, in the order the configuration names them.
+ *
+ * `conf.yaml` names a pool; without one, every account on disk is a worker,
+ * which is what the launcher did before the pool existed. A worker named in
+ * the file with no account file yet is not in the pool -- it has no password
+ * and no token, so it is a plan rather than an account.
+ */
+function workerPool(settings: Settings): Account[] {
+    if (settings.workers.length === 0) return [...settings.accounts.values()];
+
+    return settings.workers
+        .map((worker) => settings.accounts.get(worker.name))
+        .filter((account): account is Account => account !== undefined);
+}
+
+/** Says which workers still need provisioning, since that is the next step. */
+function unprovisioned(settings: Settings): string {
+    if (settings.workers.length === 0) {
+        return "no accounts configured, so the MCP endpoint is not opened; see --help\n";
+    }
+    const names = settings.workers.map((worker) => worker.name).join(", ");
+    return (
+        `none of the configured workers has an account file yet (${names}), ` +
+        `so the MCP endpoint is not opened; run provision-worker-user\n`
+    );
 }
 
 /** Reports wreckage from a previous run, and says nothing else. */

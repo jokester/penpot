@@ -15,8 +15,8 @@ export interface ContractHarness {
     readonly backend: ExecBackend;
     /** A command and environment that makes `port` listen inside the container. */
     serverFor(port: number): { argv: string[]; env: Record<string, string> };
-    /** A local port the backend currently considers free. */
-    freePort(): Promise<number>;
+    /** A free local port pair: a lane takes two, HTTP and WebSocket. */
+    freePort(): Promise<{ http: number; ws: number }>;
     /**
      * The in-container port behind a local one.
      *
@@ -57,7 +57,8 @@ export function execBackendContract(name: string, make: () => Promise<ContractHa
         const started: number[] = [];
 
         try {
-            const port = await h.freePort();
+            const ports = await h.freePort();
+            const port = ports.http;
             const inContainer = h.upstreamOf(port);
             assert.ok(!(await backend.listening()).includes(inContainer), "the chosen port should start free");
 
@@ -69,7 +70,7 @@ export function execBackendContract(name: string, make: () => Promise<ContractHa
 
             await until("the port to start listening", async () => (await backend.listening()).includes(inContainer));
 
-            const exposure = await backend.expose(port, control.signal);
+            const exposure = await backend.expose(ports, control.signal);
             assert.ok(exposure.url.includes(String(port)), `expected ${exposure.url} to name port ${port}`);
 
             await exposure.close();
@@ -90,7 +91,8 @@ export function execBackendContract(name: string, make: () => Promise<ContractHa
         // reachable. Only an exchange distinguishes.
         const h = await make();
         try {
-            await assert.rejects(() => h.backend.expose(h.deadPort(), AbortSignal.timeout(20_000)));
+            const dead = h.deadPort();
+            await assert.rejects(() => h.backend.expose({ http: dead, ws: dead + 1 }, AbortSignal.timeout(20_000)));
         } finally {
             await h.cleanup([]);
         }

@@ -23,7 +23,16 @@ import type { LaneHandle, LaneSource } from "./leases.ts";
 const WIPE_CODE = "for (const key of Object.keys(storage)) delete storage[key]; return Object.keys(storage).length;";
 
 export interface SupervisorLaneOptions {
-    readonly account: Account;
+    /**
+     * The worker pool, in preference order.
+     *
+     * One lane takes one worker and holds it until the lane closes, so this is
+     * a ceiling on concurrent documents alongside the port range. Separate
+     * identities are the point: two agents editing adjacent documents as the
+     * same Penpot user see each other's presence and selections, which reads
+     * as the application misbehaving.
+     */
+    readonly accounts: readonly Account[];
     readonly flavour: string;
     /** How long to wait for a lane to reach connected before giving up. */
     readonly openTimeoutMs?: number;
@@ -36,20 +45,52 @@ export function supervisorLanes(
     options: SupervisorLaneOptions
 ): LaneSource {
     const openTimeoutMs = options.openTimeoutMs ?? 180_000;
+    /** Which worker each open lane holds, so it is free again when it closes. */
+    const held = new Map<string, string>();
+
+    /** The first worker nobody is using, preferring the eligible ones. */
+    function take(eligible: readonly string[]): Account {
+        const busy = new Set(held.values());
+        const allowed =
+            eligible.length === 0
+                ? options.accounts
+                : options.accounts.filter((account) => eligible.includes(account.name));
+
+        if (allowed.length === 0) {
+            fail("lane-refused", `no configured worker can see that document; tried ${eligible.join(", ")}`, {});
+        }
+
+        const free = allowed.find((account) => !busy.has(account.name));
+        if (free === undefined) {
+            // Distinct from the registry's own capacity refusal, and worth its
+            // own words: the lanes are free and the workers are not, which is
+            // fixed by provisioning another worker rather than by waiting.
+            fail(
+                "lane-refused",
+                `every worker is already driving a document (${allowed.length} configured); ` +
+                    `provision another to raise the ceiling`,
+                { workers: allowed.length }
+            );
+        }
+        return free;
+    }
 
     return {
-        async open(document: DocumentRef, signal: AbortSignal): Promise<LaneHandle> {
+        async open(document: DocumentRef, eligible: readonly string[], signal: AbortSignal): Promise<LaneHandle> {
+            const account = take(eligible);
             const id = await supervisor.open({
-                account: options.account,
+                account,
                 document,
                 mode: "exec",
                 headed: false,
                 flavour: options.flavour,
             });
+            held.set(id, account.name);
 
             const clientUrl = await settled(supervisor, id, openTimeoutMs, signal).catch(async (err: unknown) => {
                 // A lane that never connected is not left behind for the idle
                 // sweep to find; it is ended here, where the failure is known.
+                held.delete(id);
                 await supervisor.close(id).catch(() => undefined);
                 throw err;
             });
@@ -58,6 +99,7 @@ export function supervisorLanes(
         },
 
         async close(id: string): Promise<void> {
+            held.delete(id);
             await supervisor.close(id).catch(() => undefined);
         },
 
@@ -105,9 +147,16 @@ function settled(supervisor: LaneSupervisor, id: string, timeoutMs: number, sign
     });
 }
 
-/** How many lanes the deployment's published range allows. */
-export function laneCapacity(range: { lo: number; hi: number }): number {
+/**
+ * How many lanes can run at once: whichever of ports and workers runs out first.
+ *
+ * Both are real ceilings and they fail differently, so the smaller one is the
+ * capacity and the two refusals stay distinct -- "every lane is busy" is
+ * waited out, "every worker is busy" is fixed by provisioning another.
+ */
+export function laneCapacity(range: { lo: number; hi: number }, workers = Number.POSITIVE_INFINITY): number {
     const pairs = Math.floor((range.hi - range.lo + 1) / 2);
     if (pairs < 1) fail("not-configured", `the published range ${range.lo}-${range.hi} has room for no lanes`, {});
-    return pairs;
+    if (workers < 1) fail("not-configured", `no worker accounts are configured, so no lane can be opened`, {});
+    return Math.min(pairs, workers);
 }

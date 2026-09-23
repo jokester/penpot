@@ -41,13 +41,21 @@ export function parseListen(value: string): Partial<Address> {
  * export it would move the façade off loopback. The bind address is logged at
  * startup for exactly that reason.
  */
-export function facadeAddress(listen: Partial<Address> | undefined, env: NodeJS.ProcessEnv): Address {
+export function facadeAddress(
+    listen: Partial<Address> | undefined,
+    env: NodeJS.ProcessEnv,
+    conf?: Partial<Address>
+): Address {
     const fromEnv: Partial<Address> = {
         ...(env.HOST === undefined || env.HOST.trim() === "" ? {} : { host: env.HOST.trim() }),
         ...(env.PORT === undefined || env.PORT.trim() === "" ? {} : { port: port(env.PORT.trim()) }),
     };
 
-    return { ...DEFAULT_ADDRESS, ...fromEnv, ...(listen ?? {}) };
+    // The file beats the environment. $PORT is ambient -- inherited from a
+    // shell, a supervisor, a parent process that had its own reasons -- while
+    // conf.yaml was written for this deployment by someone who meant it. The
+    // flag beats both, because it was typed just now.
+    return { ...DEFAULT_ADDRESS, ...fromEnv, ...(conf ?? {}), ...(listen ?? {}) };
 }
 
 /** True when the address is reachable only from this machine. */

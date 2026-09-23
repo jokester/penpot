@@ -173,8 +173,11 @@ export function playwrightSessions(options: LaunchOptions = {}): OpenSessionCont
         });
 
         return {
-            async cookies(origin: string) {
-                return await context.cookies(origin);
+            async cookies() {
+                // Unfiltered: Playwright will not return a Secure cookie for
+                // an http:// URL, which on loopback hides a session that is
+                // there. The store matches the host itself.
+                return await context.cookies();
             },
             async post(url: string, body: unknown) {
                 const response = await context.request.post(url, {
@@ -182,6 +185,9 @@ export function playwrightSessions(options: LaunchOptions = {}): OpenSessionCont
                     data: body as Record<string, unknown>,
                 });
                 return { ok: response.ok(), status: response.status(), text: () => response.text() };
+            },
+            async addCookies(cookies) {
+                await context.addCookies(cookies as Parameters<typeof context.addCookies>[0]);
             },
             async close() {
                 await context.close().catch(() => undefined);

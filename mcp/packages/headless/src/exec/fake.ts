@@ -7,6 +7,7 @@
 // starts and vanish when it is killed.
 
 import { fail } from "../core/errors.ts";
+import type { PortPair } from "../core/ports.ts";
 import type { Container, ExecBackend, ExecResult, Exposure, RemoteProcess, RunOptions } from "./backend.ts";
 
 /** A process the fake pretends to be running. */
@@ -101,7 +102,8 @@ export class FakeExecBackend implements ExecBackend {
         return [...ports].sort((a, b) => a - b);
     }
 
-    async expose(port: number, _signal: AbortSignal): Promise<Exposure> {
+    async expose(ports: PortPair, _signal: AbortSignal): Promise<Exposure> {
+        const port = ports.http;
         // Faithful to compose: exposing means proving something answers, so a
         // port nothing is serving is refused rather than quietly exposed.
         if (this.#options.failExpose === true || !(await this.listening()).includes(port)) {
