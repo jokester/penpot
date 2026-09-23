@@ -100,14 +100,13 @@ async function dispatch(options: Options, settings: Settings, env: NodeJS.Proces
 
     try {
         if (options.command === "no-tui") {
-            return await headless(options, settings, supervisor, leftovers.length, io, env, stopping.signal);
+            return await headless(options, settings, supervisor, serving, leftovers.length, io, env, stopping.signal);
         }
 
-        // Nobody is watching a screen that is not a terminal, and the TUI
-        // redraws once a second -- detached, that is a screenful per second
-        // into a log file. So when stdout is redirected the launcher serves
-        // quietly instead of drawing, which is what a background service wants
-        // and needs no flag to ask for.
+        // Nobody is watching a screen that is not a terminal, and the list
+        // redraws once a second -- redirected, that is a screenful per second
+        // into a file. So a redirected stdout switches the screen off rather
+        // than needing a flag to say so.
         if (!isTerminal(io.out)) {
             return await serveQuietly(supervisor, serving, io, stopping.signal);
         }
@@ -222,14 +221,19 @@ async function headless(
     options: Options,
     settings: Settings,
     supervisor: LaneSupervisor,
+    serving: Serving | null,
     leftovers: number,
     io: Io,
     env: NodeJS.ProcessEnv,
     stopping: AbortSignal
 ): Promise<number> {
     if (leftovers > 0) io.err.write(`warning: ${leftovers} leftover(s) from a previous run; try --check\n`);
-    if (options.lanes.length === 0) {
-        io.err.write("--no-tui needs at least one lane; see --help\n");
+
+    // No lanes is not a mistake once the endpoint exists: an agent asks for
+    // documents through it, so there is nothing to name up front. Without the
+    // endpoint there would genuinely be nothing to do.
+    if (options.lanes.length === 0 && serving === null) {
+        io.err.write("--no-tui with no lanes needs the MCP endpoint; drop --no-serve, or name a lane\n");
         return 2;
     }
 
@@ -274,9 +278,9 @@ function isTerminal(out: NodeJS.WritableStream): boolean {
 /**
  * Serves the MCP endpoint and waits, logging what the lanes do.
  *
- * The shape a background service wants: no screen, one line per transition,
- * and an exit only on a signal. Unlike `--no-tui` it needs no lanes named up
- * front, because the agent asks for documents through the endpoint.
+ * No screen, one line per transition, and an exit only on a signal or on `q`'s
+ * equivalent. Reached either by asking -- `--no-tui` with no lanes named -- or
+ * by redirecting stdout, where drawing would be pointless.
  */
 async function serveQuietly(
     supervisor: LaneSupervisor,

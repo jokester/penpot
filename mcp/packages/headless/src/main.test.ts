@@ -94,11 +94,14 @@ test("--check returns non-zero when it finds wreckage", async () => {
     assert.ok(r.out.text.includes("pid 348"), r.out.text);
 });
 
-test("--no-tui with no lanes says what it needs", async () => {
-    const r = run(["--no-tui"], { backend: new FakeExecBackend() });
+test("--no-tui with no lanes and no endpoint has nothing to do", async () => {
+    // With the endpoint open this is the ordinary way to run: an agent asks
+    // for documents through it, so there is nothing to name up front. Without
+    // it there genuinely is nothing.
+    const r = run(["--no-tui", "--no-serve"], { backend: new FakeExecBackend() });
 
     assert.equal(await r.code, 2);
-    assert.ok(r.err.text.includes("needs at least one lane"), r.err.text);
+    assert.ok(r.err.text.includes("needs the MCP endpoint"), r.err.text);
 });
 
 test("a lane naming an account that does not exist lists the ones that do", async () => {

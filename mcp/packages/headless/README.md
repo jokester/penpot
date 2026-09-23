@@ -40,14 +40,14 @@ resolves at runtime.
 
 Formatting comes from the parent: `pnpm -C .. run fmt` uses `mcp/.prettierrc`.
 
-## Running it as a service
+## Running it
 
-`./serve` starts, stops and restarts the MCP endpoint in the background.
+In the foreground, in a terminal you keep. There is no daemon and no pid file:
+the launcher owns every lane it opens, so the way to end them is to end it.
 
 ```sh
-./serve start          # or restart, stop, status, logs
-./serve status
-./serve restart --listen 0.0.0.0:4500
+pnpm start              # the lane list, and the MCP endpoint
+pnpm start -- --no-tui  # the same, logging a line per transition instead
 ```
 
 The agent's configuration is then one static URL that never changes:
@@ -56,13 +56,13 @@ The agent's configuration is then one static URL that never changes:
 { "penpot": { "url": "http://127.0.0.1:4400/mcp" } }
 ```
 
-State lives in `$XDG_STATE_HOME/mcp-headless` (so `~/.local/state/mcp-headless`
-by default): a pid file and a log. Stopping sends `SIGTERM`, which runs the same
-shutdown as quitting the TUI — every lane ends and the container is left as it
-was found — so a restart with documents connected is safe.
+`q` or `ctrl-c` quits, and quitting ends every lane and leaves the container as
+it was found. `--listen`, `$HOST` and `$PORT` move the endpoint;
+`--no-serve` leaves it closed.
 
-When stdout is not a terminal the launcher serves quietly and logs one line per
-lane transition, instead of drawing a screen nobody is looking at once a second.
+Redirecting stdout switches off the screen automatically — the list redraws once
+a second, which is a screenful per second into a file — so `pnpm start > log`
+logs transitions rather than frames.
 
 ## Using it
 
