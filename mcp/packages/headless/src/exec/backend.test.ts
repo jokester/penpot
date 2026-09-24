@@ -213,3 +213,14 @@ if (E2E) {
 } else {
     test("kubectl contract is skipped without MCP_HEADLESS_E2E=1", { skip: true }, () => undefined);
 }
+
+test("$KUBECTL_BIN names the binary, because its path is the machine's business", async () => {
+    // The cluster here is reached through a wrapper that pins a kubeconfig,
+    // and its path differs per checkout -- so it does not belong in a
+    // conf.yaml meant to be committed.
+    const backend = (await backendFor(KUBECTL, { KUBECTL_BIN: "/opt/bin/kubectl" })) as KubectlBackend;
+
+    assert.equal(backend.binary, "/opt/bin/kubectl");
+    assert.equal(((await backendFor(KUBECTL, {})) as KubectlBackend).binary, "kubectl");
+    assert.equal(((await backendFor(KUBECTL, { KUBECTL_BIN: "" })) as KubectlBackend).binary, "kubectl");
+});

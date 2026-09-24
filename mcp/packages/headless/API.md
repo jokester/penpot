@@ -164,7 +164,7 @@ export interface ExecBackend {
   expose(ports: PortPair, signal: AbortSignal): Promise<Exposure>;
 }
 
-export function backendFor(d: Deployment): ExecBackend;
+export function backendFor(d: Deployment, env?: NodeJS.ProcessEnv): ExecBackend;
 ```
 
 **`start` resolves with an in-container pid, not a child handle.** An exec client
@@ -196,6 +196,10 @@ need forwarding, and forwarding only the HTTP one gives a lane that opens,
 answers, and never becomes ready.
 
 ### `exec/kubectl.ts`
+
+**`$KUBECTL_BIN` names the binary.** An environment variable rather than a
+config key: which `kubectl` to run is a property of the machine, and `conf.yaml`
+is meant to be committed. It is the one thing `backendFor` needs `env` for.
 
 **The pod is resolved by label on every call.** A pod's name changes on every
 restart, so a name cached at startup stops existing the first time the

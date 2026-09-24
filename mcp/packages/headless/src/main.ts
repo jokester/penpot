@@ -81,7 +81,7 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv, io: 
 }
 
 async function dispatch(options: Options, settings: Settings, env: NodeJS.ProcessEnv, io: Io): Promise<number> {
-    const backend = await resolveBackend(settings, io);
+    const backend = await resolveBackend(settings, env, io);
     const portRange = settings.deployment?.portRange ?? { lo: 4601, hi: 4608 };
 
     if (options.command === "check") return await check(settings, backend, portRange, io);
@@ -543,10 +543,10 @@ function launchOptions(env: NodeJS.ProcessEnv) {
 }
 
 /** Builds the backend, unless a test supplied one or there is no deployment. */
-async function resolveBackend(settings: Settings, io: Io): Promise<ExecBackend | undefined> {
+async function resolveBackend(settings: Settings, env: NodeJS.ProcessEnv, io: Io): Promise<ExecBackend | undefined> {
     if (io.backend !== undefined) return io.backend ?? undefined;
     if (settings.deployment === undefined) return undefined;
-    return await backendFor(settings.deployment);
+    return await backendFor(settings.deployment, env);
 }
 
 /**

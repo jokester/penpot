@@ -41,12 +41,23 @@ const DEFAULT_ADMIN_SELECTOR = "app=penpot-backend";
 /** Knobs a test needs and an operator does not. */
 export interface KubectlOptions {
     readonly reachableTimeoutMs?: number;
-    /** The binary to run. A test points this at a script. */
+    /**
+     * The binary to run. Default `kubectl`; `$KUBECTL_BIN` sets it.
+     *
+     * A path, not a config key, because it is a property of the machine rather
+     * than of the deployment -- this cluster is reached through a wrapper that
+     * pins a kubeconfig, and its path differs per checkout.
+     */
     readonly kubectl?: string;
 }
 
 export class KubectlBackend implements ExecBackend {
     readonly kind = "kubectl" as const;
+
+    /** Which binary this will run. Readable so a test can check it. */
+    get binary(): string {
+        return this.#binary;
+    }
 
     readonly #namespace: string;
     readonly #selector: string;

@@ -100,12 +100,19 @@ export interface ExecBackend {
     expose(ports: PortPair, signal: AbortSignal): Promise<Exposure>;
 }
 
-/** Builds the backend a deployment describes. */
-export async function backendFor(deployment: Deployment): Promise<ExecBackend> {
+/**
+ * Builds the backend a deployment describes.
+ *
+ * `env` supplies the machine-local details that have no business in a
+ * configuration file meant to be committed: which `kubectl` to run, when it is
+ * a wrapper on a path that differs per host.
+ */
+export async function backendFor(deployment: Deployment, env: NodeJS.ProcessEnv = {}): Promise<ExecBackend> {
     if (deployment.backend === "compose") {
         const { ComposeBackend } = await import("./compose.ts");
         return new ComposeBackend(deployment);
     }
     const { KubectlBackend } = await import("./kubectl.ts");
-    return new KubectlBackend(deployment);
+    const kubectl = env.KUBECTL_BIN;
+    return new KubectlBackend(deployment, kubectl === undefined || kubectl === "" ? {} : { kubectl });
 }

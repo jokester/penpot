@@ -210,6 +210,11 @@ pod: a pod's name changes on every restart.
 }
 ```
 
+`$KUBECTL_BIN` names the binary when it is not plain `kubectl` -- a wrapper
+that pins a kubeconfig, say. It is an environment variable rather than a config
+key because it is a property of the machine, not of the deployment, and
+`conf.yaml` is meant to be committed.
+
 `exposure` is the only real choice there. `none` means the ports are already
 node-local — a `hostPort` or a node-local Service — and there is nothing to
 own; it is right whenever the launcher runs on the node beside the pod.
