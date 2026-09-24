@@ -217,3 +217,20 @@ test("provisioning writes the account file under the configured accounts dir", a
     // The profile was created in the admin container, not the MCP one.
     assert.equal(backend.runs[0]?.container, "admin");
 });
+
+test("a worker that cannot sign in is named with the origin it could not reach", async () => {
+    // The underlying error often does not name it, and the origin is usually
+    // the thing that is wrong: a worker path has to be reachable AND
+    // trustworthy to the browser, and "cannot sign in" says neither.
+    const files = {
+        ...DEPLOYMENT,
+        [`${CONFIG}/accounts/worker-a.env`]:
+            'PENPOT_ORIGIN="http://127.0.0.1:1"\nPENPOT_EMAIL="a@x.test"\nPENPOT_PASSWORD="pw"\n',
+    };
+
+    const r = runRaw(["--config", CONFIG, "--no-tui"], { backend: new FakeExecBackend() }, files);
+
+    assert.equal(await r.code, 2);
+    assert.match(r.err.text, /worker-a cannot sign in at http:\/\/127\.0\.0\.1:1/);
+    assert.match(r.err.text, /trustworthy origin/);
+});

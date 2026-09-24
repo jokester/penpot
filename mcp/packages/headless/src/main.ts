@@ -174,11 +174,27 @@ async function serve(
             await ensureSession(account, store, AbortSignal.timeout(90_000));
             accounts.push(account);
         } catch (err) {
-            io.err.write(`${account.name} cannot sign in, so it is not in the pool: ${message(err)}\n`);
+            // The origin is named here because the underlying error often does
+            // not, and because it is the thing that is usually wrong: a worker
+            // path has to be reachable AND trustworthy to the browser, and
+            // "cannot sign in" says neither.
+            // First line only. Playwright appends a seven-line call log with
+            // the request headers it sent, which is its own internals rather
+            // than anything the reader can act on, and it buries the next
+            // worker's line.
+            const why = message(err).split("\n")[0];
+            io.err.write(
+                `${account.name} cannot sign in at ${normalizeOrigin(account.origin)}, ` +
+                    `so it is not in the pool: ${why}\n`
+            );
         }
     }
     if (accounts.length === 0) {
-        io.err.write("no worker could sign in, so the MCP endpoint is not opened\n");
+        io.err.write(
+            `no worker could sign in, so the MCP endpoint is not opened. ` +
+                `Each account's PENPOT_ORIGIN must answer from this machine, and the browser ` +
+                `keeps a session only for a trustworthy origin -- loopback or https\n`
+        );
         return null;
     }
 
