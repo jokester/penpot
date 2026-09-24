@@ -187,10 +187,19 @@ export class LaneSupervisor implements Supervisor {
         for (const lane of lanes) lane.control.abort();
 
         const outstanding = new Set(lanes);
-        await Promise.race([
-            Promise.all(lanes.map((lane) => lane.finished.then(() => outstanding.delete(lane)))),
-            sleep(deadlineMs),
-        ]);
+        const deadline = deadlineIn(deadlineMs);
+        try {
+            await Promise.race([
+                Promise.all(lanes.map((lane) => lane.finished.then(() => outstanding.delete(lane)))),
+                deadline.reached,
+            ]);
+        } finally {
+            // The deadline is a ceiling, not work. Left pending it keeps
+            // Node's event loop alive until it fires, so a quit with nothing
+            // to stop still took the full fifteen seconds to exit -- which is
+            // exactly what `run` then `q` felt like.
+            deadline.cancel();
+        }
 
         const forced = outstanding.size;
         this.#lanes.clear();
@@ -274,6 +283,11 @@ export class LaneSupervisor implements Supervisor {
     }
 }
 
-function sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+/** A timeout that can be called off, so winning the race also ends it. */
+function deadlineIn(ms: number): { reached: Promise<void>; cancel: () => void } {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const reached = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ms);
+    });
+    return { reached, cancel: () => clearTimeout(timer) };
 }
