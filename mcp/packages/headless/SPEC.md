@@ -198,20 +198,29 @@ the node's loopback. A tunnel would satisfy that too — the only reason
 `port-forward` was ever a candidate — but a node-local Service satisfies it with
 no moving parts.
 
-One caveat to verify on the real cluster rather than trust from here:
-**NodePort answering on `127.0.0.1` is kube-proxy behaviour, not a guarantee.**
-iptables mode has historically allowed it by setting
-`net.ipv4.conf.all.route_localnet=1`; nftables mode does not, and the behaviour
-has been treated as a wart to remove. `hostPort` and `hostNetwork` bind the node
-directly and are deterministic. On the node:
+One caveat, now verified rather than trusted: **NodePort answering on
+`127.0.0.1` is kube-proxy behaviour, not a guarantee.** iptables mode allows it
+by setting `net.ipv4.conf.all.route_localnet=1`; nftables mode does not, and
+the behaviour has been treated as a wart to remove. `hostPort` and
+`hostNetwork` bind the node directly and are deterministic.
 
-```sh
-kubectl -n penpot get svc penpot-mcp -o wide
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<nodePort>/mcp
-```
+Measured on the home cluster, 2026-09-24: `route_localnet` is `1` and an
+existing NodePort answers on `127.0.0.1`. So `exposure: "none"` over a NodePort
+works there today, and it is what makes a launcher on *any* node need no
+tunnel at all — the case `hostPort` cannot serve, since it binds one node.
 
-If that answers, `exposure: "none"` is right and nothing else is needed. If it
-does not, prefer `hostPort` over a tunnel.
+The trade is exposure, and it is not small. A `hostPort` takes an explicit
+`hostIP` and can be loopback-only; a NodePort is on every node address and
+cannot be restricted, because `--nodeport-addresses` is a kube-proxy-wide
+setting. A lane's MCP server is an unauthenticated endpoint whose entire job is
+running arbitrary code against a design document. So: `hostPort` where the
+launcher and the pod share a node, NodePort where they do not and the operator
+accepts that, `port-forward` off-cluster.
+
+Both routes are the same `exposure: "none"` to the launcher. Which ports it
+reaches is `portRange`, and `upstreamPortRange` maps them onto what the
+container binds -- a nodePort range sits 26000 above the container's on that
+cluster, and a constant offset is all that takes.
 
 A third shape is worth noting because it is the tidiest: **the launcher as a
 sidecar in the MCP pod.** The WebSocket is then `localhost` inside the pod,

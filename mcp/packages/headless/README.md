@@ -216,10 +216,20 @@ key because it is a property of the machine, not of the deployment, and
 `conf.yaml` is meant to be committed.
 
 `exposure` is the only real choice there. `none` means the ports are already
-node-local — a `hostPort` or a node-local Service — and there is nothing to
-own; it is right whenever the launcher runs on the node beside the pod.
-`port-forward` is for a launcher outside the cluster with no other route in,
-and it costs a `kubectl port-forward` child per lane.
+node-local and there is nothing to own; `port-forward` is for a launcher with
+no other route in, and costs a `kubectl port-forward` child per lane.
+
+Two things make a port node-local, and they are not interchangeable:
+
+| | reaches | restrictable to loopback |
+| --- | --- | --- |
+| `hostPort` | the one node it is bound on | yes, with `hostIP` |
+| NodePort | every node, `127.0.0.1` included | no |
+
+So `hostPort` when the launcher shares a node with the pod, NodePort when it
+does not. The second depends on `route_localnet=1` — iptables-mode kube-proxy
+sets it, nftables does not — and puts the lane on every node address, which
+matters because a lane server is unauthenticated and runs arbitrary code.
 
 **Both of a lane's ports are forwarded, not just one.** The agent connects to
 the HTTP port and the browser dials the WebSocket; forwarding only the first
