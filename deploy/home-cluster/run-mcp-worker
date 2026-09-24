@@ -1,0 +1,404 @@
+#!/usr/bin/env bash
+#
+# Run one MCP worker in the foreground: the browser that hosts Penpot's MCP
+# plugin, and the MCP server it talks to. Ctrl-C stops both.
+#
+# "Worker" rather than "agent" on purpose -- the thing on the other end of the
+# MCP transport is an agent too, and only one of them is a browser.
+#
+# One document per worker. Penpot's plugin API has no openFile: every accessor
+# reads a single global current-file-id, so a browser page can only ever drive
+# the file it has open. Run this once per document, each on its own ports.
+#
+#   ./run-mcp-worker --mcp exec --file-id <uuid>          # a second document
+#   ./run-mcp-worker --headed                             # watch the default one
+#
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
+HOST_DIR="$REPO/mcp/packages/host"
+
+MODE=builtin              # builtin | exec | local
+HEADLESS=true
+HOST=localhost
+PORT=""                   # empty => pick a free pair from the published range
+WS_PORT=""
+WS_URI=""
+MULTI_USER=false
+REPL=false
+BROWSER=host              # host | container
+WORKER_IMAGE="${PENPOT_WORKER_IMAGE:-}"
+ENV_FILE="$HERE/worker/worker.env"
+FILE_ID=""
+TEAM_ID=""
+PROFILE_DIR=""
+
+usage() {
+    cat <<'USAGE'
+Usage: run-mcp-worker [options]
+
+Server:
+  --mcp builtin      No server of our own; the plugin uses the one the Penpot
+                     instance already serves at <origin>/mcp/ws. Default, and
+                     the only mode that needs no ports. One document only,
+                     because that server is shared.
+  --mcp exec         Start a single-user server INSIDE the stock penpot-mcp
+                     container via `docker compose exec`. Best for a second,
+                     third, ... document: it is the same bundle that serves the
+                     plugin, so the two can never be version-skewed, and it
+                     needs no build and no extra image.
+  --mcp local        Start the build in mcp/packages/server/dist. For hacking
+                     on the server; may be skewed against the stock plugin.
+
+  --host HOST        Bind address for --mcp local            (default localhost)
+  --port N           MCP streamable HTTP port    (default: first free in range)
+  --ws-port N        Plugin WebSocket port                        (default N+1)
+  --ws-uri URI       What the BROWSER dials; default ws://localhost:<ws-port>
+  --multi-user       Require ?userToken= from clients, as the packaged image
+                     does. Off here: single-user needs no token at all.
+  --repl             Also start the server's REPL console, on PORT+2. Off by
+                     default: the stock 2.17 server always tries to start one,
+                     and without this it is aimed at an occupied port so the
+                     listen fails. In exec mode the console is reachable only
+                     from inside the container unless you publish the port.
+
+Document and browser:
+  --file-id UUID     Drive this file instead of the one in the env file. Also
+                     gives the browser its own profile, so several workers do
+                     not fight over one profile directory.
+  --team-id UUID     The team that file belongs to. Needed whenever the file is
+                     not in the team named by the env file -- a shared team the
+                     worker was invited to, for instance. A workspace URL
+                     carrying the wrong team renders nothing.
+  --profile DIR      Browser profile directory (overrides the above).
+  --headed           Show the browser. Needs a DISPLAY you are authorised on;
+                     run it from inside the VNC session, or export that
+                     session's DISPLAY and XAUTHORITY. "Authorization required,
+                     but no authorization protocol specified" means the cookie
+                     does not match, not that the flag is wrong.
+  --headless         Hide it (default).
+  --browser host|container
+                     Where the browser runs. "host" (default) uses the
+                     Playwright build in mcp/packages/host/node_modules, which
+                     you keep current with `pnpm exec playwright install`.
+                     "container" runs it inside the pinned Playwright image
+                     instead, so the browser version is fixed by the image tag
+                     rather than by whatever is installed here. Headed works in
+                     both: the container draws on your X server through the
+                     mounted socket. Override the image with
+                     PENPOT_WORKER_IMAGE.
+
+  --env-file PATH    Defaults to worker/worker.env. Flags override it.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --env-file) ENV_FILE="$2"; shift 2 ;;
+        --host)     HOST="$2"; shift 2 ;;
+        --port)     PORT="$2"; shift 2 ;;
+        --ws-port)  WS_PORT="$2"; shift 2 ;;
+        --ws-uri)   WS_URI="$2"; shift 2 ;;
+        --file-id)  FILE_ID="$2"; shift 2 ;;
+        --team-id)  TEAM_ID="$2"; shift 2 ;;
+        --profile)  PROFILE_DIR="$2"; shift 2 ;;
+        --headed)   HEADLESS=false; shift ;;
+        --headless) HEADLESS=true; shift ;;
+        --browser)  BROWSER="$2"; shift 2 ;;
+        --mcp)      MODE="$2"; shift 2 ;;
+        --multi-user) MULTI_USER=true; shift ;;
+        --repl)     REPL=true; shift ;;
+        -h|--help)  usage; exit 0 ;;
+        *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+case "$MODE" in builtin|exec|local) ;; *) echo "--mcp must be builtin, exec or local" >&2; exit 2 ;; esac
+case "$BROWSER" in host|container) ;; *) echo "--browser must be host or container" >&2; exit 2 ;; esac
+
+[[ -f "$ENV_FILE" ]] || { echo "no such env file: $ENV_FILE" >&2; exit 2; }
+set -a; source "$ENV_FILE"; set +a
+
+: "${PENPOT_ORIGIN:?set PENPOT_ORIGIN in $ENV_FILE}"
+: "${PENPOT_FILE_URL:?set PENPOT_FILE_URL in $ENV_FILE}"
+
+# --file-id retargets the URL and isolates the profile, so two workers started
+# from the same env file do not collide on the browser profile lock.
+# The id patterns end in * rather than +: a worker provisioned without a
+# scratch file has an empty file-id in its env, and a + would match nothing,
+# leaving the override silently unapplied.
+if [[ -n "$FILE_ID" ]]; then
+    PENPOT_FILE_URL="$(sed -E "s/file-id=[0-9a-fA-F-]*/file-id=$FILE_ID/" <<<"$PENPOT_FILE_URL")"
+    [[ -z "$PROFILE_DIR" ]] && PROFILE_DIR="$HOME/.cache/penpot-headless/profile-${FILE_ID:0:8}"
+fi
+if [[ -n "$TEAM_ID" ]]; then
+    PENPOT_FILE_URL="$(sed -E "s/team-id=[0-9a-fA-F-]*/team-id=$TEAM_ID/" <<<"$PENPOT_FILE_URL")"
+fi
+
+# A blank id renders an empty workspace with a clean console, the most
+# expensive failure in this system to diagnose. Refuse it up front.
+for part in file-id team-id; do
+    if [[ "$PENPOT_FILE_URL" =~ ${part}=(\&|$) ]]; then
+        echo "$part is empty in the workspace URL. Pass --${part}, or set a" >&2
+        echo "complete PENPOT_FILE_URL in the env file." >&2
+        exit 2
+    fi
+done
+[[ -n "$PROFILE_DIR" ]] && export PENPOT_PROFILE_DIR="$PROFILE_DIR"
+export PENPOT_FILE_URL
+
+if [[ "$HEADLESS" == false ]]; then
+    [[ -n "${DISPLAY:-}" ]] || { echo "--headed needs DISPLAY (inside VNC, e.g. :3)" >&2; exit 2; }
+    if command -v xdpyinfo >/dev/null 2>&1 && ! xdpyinfo >/dev/null 2>&1; then
+        echo "cannot open DISPLAY=$DISPLAY -- set XAUTHORITY to that session's file." >&2
+        exit 2
+    fi
+fi
+
+# Ports in use by servers already running inside the penpot-mcp container.
+#
+# The host cannot answer this: docker publishes the whole range, so every port
+# in it shows as LISTEN on the host whether or not anything sits behind it.
+# Only the container knows, so ask it.
+ports_busy_in_container() {
+    local hex
+    # The container prints hex (its awk has no strtonum); bash converts.
+    # awk is invoked directly rather than through `sh -c`: the extra quoting
+    # layer silently ate the program and the probe returned nothing, which
+    # would have made every port look free.
+    #
+    # BOTH tcp and tcp6. The MCP server binds its HTTP port on IPv4 and its
+    # WebSocket port on IPv6, so reading only /proc/net/tcp reports every
+    # WebSocket port as free -- and pick_ports then hands out a port that is
+    # already serving, producing two servers that half-work.
+    hex="$( (cd "$HERE" && docker compose exec -T penpot-mcp \
+        awk '$4=="0A" {split($2,a,":"); print a[2]}' /proc/net/tcp /proc/net/tcp6) 2>/dev/null )" || return 0
+    local h
+    for h in $hex; do
+        [[ "$h" =~ ^[0-9A-Fa-f]+$ ]] && echo "$((16#$h))"
+    done
+}
+
+# Pick the first free HTTP/WS pair from the range the compose file publishes.
+pick_ports() {
+    local lo="${PENPOT_DOC_PORT_MIN:-4601}" hi="${PENPOT_DOC_PORT_MAX:-4608}" p busy
+    busy="$(ports_busy_in_container)"
+    for ((p = lo; p + 1 <= hi; p += 2)); do
+        if ! grep -qx -e "$p" -e "$((p + 1))" <<<"$busy"; then
+            PORT="$p"; WS_PORT="$((p + 1))"; return 0
+        fi
+    done
+    echo "no free port pair in $lo-$hi; raise PENPOT_DOC_PORT_MAX or stop a worker." >&2
+    return 1
+}
+
+SERVER_PID=""
+EXEC_PIDFILE=""
+CONTAINER_ENV=""
+cleanup() {
+    # Holds the worker's password when --browser container is used.
+    [[ -n "$CONTAINER_ENV" ]] && rm -f "$CONTAINER_ENV" || true
+
+    # A `docker compose exec` client dying does NOT stop the process inside the
+    # container, so it is killed by the pid it recorded on the way up.
+    if [[ -n "$EXEC_PIDFILE" ]]; then
+        (cd "$HERE" && docker compose exec -T penpot-mcp sh -c \
+            "kill \$(cat $EXEC_PIDFILE) 2>/dev/null; rm -f $EXEC_PIDFILE" >/dev/null 2>&1) || true
+    fi
+    [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null || true
+    wait 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+if [[ "$MODE" != builtin ]]; then
+    [[ -n "$PORT" ]] || pick_ports
+    [[ -n "$WS_PORT" ]] || WS_PORT="$((PORT + 1))"
+    [[ -n "$WS_URI" ]] || WS_URI="ws://localhost:$WS_PORT"
+fi
+
+# In exec mode the server lives inside penpot-mcp and is reachable only on the
+# range the compose file publishes. A port outside it starts a server that works
+# perfectly and that nothing can reach: the MCP client gets ConnectionRefused,
+# and -- because the browser runs on the host too -- the plugin never reaches
+# the WebSocket either, so the worker sits there connected to nothing.
+if [[ "$MODE" == exec ]]; then
+    lo="${PENPOT_DOC_PORT_MIN:-4601}" hi="${PENPOT_DOC_PORT_MAX:-4608}"
+    for pair in "HTTP:$PORT" "WebSocket:$WS_PORT"; do
+        name="${pair%%:*}" value="${pair##*:}"
+        if (( value < lo || value > hi )); then
+            cat >&2 <<MSG
+$name port $value is outside the published range $lo-$hi, so nothing on this
+host could reach it. docker-compose.yaml publishes only that range; raise
+PENPOT_DOC_PORT_MAX and recreate penpot-mcp to widen it, pick a port inside it,
+or drop --port and let a free pair be chosen.
+MSG
+            exit 2
+        fi
+    done
+    busy="$(ports_busy_in_container)"
+    for pair in "HTTP:$PORT" "WebSocket:$WS_PORT"; do
+        name="${pair%%:*}" value="${pair##*:}"
+        if grep -qx "$value" <<<"$busy"; then
+            free=""
+            for ((q = lo; q <= hi; q++)); do
+                grep -qx "$q" <<<"$busy" || free+="$q "
+            done
+            echo "$name port $value is already in use inside penpot-mcp." >&2
+            echo "Free ports in $lo-$hi right now: ${free:-none}" >&2
+            exit 2
+        fi
+    done
+fi
+
+case "$MODE" in
+exec)
+    EXEC_PIDFILE="/tmp/mcp-$PORT.pid"
+    echo "[run] MCP server  exec in penpot-mcp   http://127.0.0.1:$PORT/mcp   ws://localhost:$WS_PORT"
+    args=""; [[ "$MULTI_USER" == true ]] && args="--multi-user"
+    # PENPOT_MCP_REPL_ENABLE does not exist in the 2.17 bundle, which builds its
+    # ReplServer unconditionally. PENPOT_MCP_REPL_PORT does exist, so aim the
+    # REPL at a port that is already taken and its listen fails, silently and
+    # harmlessly. $PORT is this server's own HTTP port, bound first.
+    if [[ "$REPL" == true ]]; then
+        repl_port="$((PORT + 2))"
+        echo "[run] MCP REPL    http://127.0.0.1:$repl_port/  (container-only unless published)"
+    else
+        repl_port="$PORT"
+    fi
+    (
+        cd "$HERE"
+        docker compose exec -T \
+            -e PENPOT_MCP_SERVER_PORT="$PORT" \
+            -e PENPOT_MCP_WEBSOCKET_PORT="$WS_PORT" \
+            -e PENPOT_MCP_REPL_PORT="$repl_port" \
+            penpot-mcp sh -c "echo \$\$ > $EXEC_PIDFILE; exec node index.js $args"
+    ) &
+    SERVER_PID=$!
+    export PENPOT_MCP_MODE=inject PENPOT_MCP_WS_URI="$WS_URI"
+    ;;
+local)
+    DIST="$REPO/mcp/packages/server/dist/index.js"
+    [[ -f "$DIST" ]] || { echo "no build at $DIST -- run 'pnpm run build' in mcp/" >&2; exit 1; }
+    plugin_js="$(curl -fsS --max-time 5 "${PENPOT_ORIGIN}/plugins/mcp/index.js" 2>/dev/null || true)"
+    if [[ -n "$plugin_js" ]] && ! grep -q heartbeat <<<"$plugin_js" && grep -q heartbeat "$DIST"; then
+        echo "WARNING: the plugin served by $PENPOT_ORIGIN sends no heartbeat, but this" >&2
+        echo "  server build expects one. Every tool call will fail with 'the Penpot" >&2
+        echo "  plugin tab appears to be suspended'. Use --mcp exec instead, which runs" >&2
+        echo "  the same bundle that serves the plugin." >&2
+    fi
+    echo "[run] MCP server  http://$HOST:$PORT/mcp   ws://$HOST:$WS_PORT"
+    args=(); [[ "$MULTI_USER" == true ]] && args+=(--multi-user)
+    # A locally built server comes from this repo, where the REPL really is
+    # gated by PENPOT_MCP_REPL_ENABLE -- no port trick needed, unlike exec mode.
+    # ConfigurationLoader resolves data/ against process.cwd().
+    (
+        cd "$(dirname "$DIST")"
+        PENPOT_MCP_SERVER_HOST="$HOST" PENPOT_MCP_SERVER_PORT="$PORT" \
+        PENPOT_MCP_WEBSOCKET_PORT="$WS_PORT" PENPOT_MCP_REPL_ENABLE="$REPL" \
+        exec node index.js "${args[@]}"
+    ) &
+    SERVER_PID=$!
+    export PENPOT_MCP_MODE=inject PENPOT_MCP_WS_URI="$WS_URI"
+    ;;
+builtin)
+    export PENPOT_MCP_MODE=builtin
+    echo "[run] MCP server  the instance's own, at $PENPOT_ORIGIN/mcp/ws"
+    ;;
+esac
+
+if [[ "$MODE" != builtin ]]; then
+    for _ in $(seq 1 40); do
+        kill -0 "$SERVER_PID" 2>/dev/null || { echo "[run] server exited early" >&2; exit 1; }
+        curl -fsS -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/mcp" 2>/dev/null && break
+        sleep 0.5
+    done
+    echo "[run] MCP client  http://127.0.0.1:$PORT/mcp"
+fi
+
+export PENPOT_HOST_HEADLESS="$HEADLESS"
+echo "[run] browser      headless=$HEADLESS display=${DISPLAY:-none} profile=${PENPOT_PROFILE_DIR:-default}"
+echo "[run] document     ${PENPOT_FILE_URL:0:100}"
+
+if [[ "$BROWSER" == host ]]; then
+    if [[ -n "${PENPOT_EMAIL:-}" && -n "${PENPOT_PASSWORD:-}" ]]; then
+        node "$HOST_DIR/spikes/login.js" >/dev/null 2>&1 || true
+    fi
+    cd "$HOST_DIR"
+    # NOT exec: that replaces this shell and takes the EXIT trap with it, so the
+    # server started inside penpot-mcp would outlive the worker and keep its
+    # ports. Orphans are only visible from inside the container, which makes
+    # them genuinely hard to notice.
+    #
+    # The explicit exit is load-bearing for the same reason: without exec the
+    # script keeps going when the browser stops, and the next thing in the file
+    # is the container path -- which would start a SECOND browser.
+    node host.js
+    exit $?
+fi
+
+## ---------------------------------------------------------------- container
+
+# The browser runs inside the pinned Playwright image, so its version is fixed
+# by the image tag instead of by whatever `playwright install` last put in the
+# host cache. The playwright CLIENT still comes from the mounted node_modules,
+# so the two must agree: default the tag to the installed client's version.
+if [[ -z "$WORKER_IMAGE" ]]; then
+    pw_version="$(node -p "require('$HOST_DIR/node_modules/playwright/package.json').version" 2>/dev/null)" \
+        || { echo "cannot read the installed playwright version -- run pnpm install in mcp/" >&2; exit 1; }
+    WORKER_IMAGE="mcr.microsoft.com/playwright:v${pw_version}-noble"
+fi
+if ! docker image inspect "$WORKER_IMAGE" >/dev/null 2>&1; then
+    echo "[run] pulling $WORKER_IMAGE (~2.5 GB, once)" >&2
+fi
+
+# --network host is not laziness. Hardened session cookies are Secure, so the
+# browser keeps them only for a trustworthy origin; localhost qualifies and a
+# container hostname does not. Sharing the host's network namespace lets the
+# worker say localhost and mean it -- and lets it reach an --mcp exec server on
+# 127.0.0.1. --ipc host keeps Chromium from dying on a small /dev/shm.
+#
+# Running as the invoking user keeps the browser profile owned by you rather
+# than by root, and lets the container read your X authority file.
+docker_args=(
+    --rm --init
+    --network host --ipc host
+    --user "$(id -u):$(id -g)"
+    -v "$REPO:/repo:ro"
+    -w /repo/mcp/packages/host
+    -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+)
+
+# The profile must live on a bind mount, not in the container, or every run
+# starts logged out. HOME goes with it: Chromium writes crash state there.
+profile_host="${PENPOT_PROFILE_DIR:-$HOME/.cache/penpot-headless/profile-local}"
+mkdir -p "$profile_host"
+docker_args+=(-v "$profile_host:/profile" -e PENPOT_PROFILE_DIR=/profile -e HOME=/profile)
+
+if [[ "$HEADLESS" != true ]]; then
+    [[ -n "${DISPLAY:-}" ]] || { echo "--headed needs DISPLAY set" >&2; exit 2; }
+    # X11 over the mounted unix socket; there is normally no TCP listener. The
+    # xauth cookie is keyed by hostname, which --network host preserves.
+    docker_args+=(-v /tmp/.X11-unix:/tmp/.X11-unix -e "DISPLAY=$DISPLAY")
+    if [[ -n "${XAUTHORITY:-$HOME/.Xauthority}" && -r "${XAUTHORITY:-$HOME/.Xauthority}" ]]; then
+        docker_args+=(-v "${XAUTHORITY:-$HOME/.Xauthority}:/xauth:ro" -e XAUTHORITY=/xauth)
+    fi
+fi
+
+# Through a file, not `-e`: a docker run command line is world-readable in ps,
+# and PENPOT_PASSWORD would sit in it for the life of the worker.
+CONTAINER_ENV="$(mktemp "${TMPDIR:-/tmp}/penpot-worker-env.XXXXXX")"
+chmod 600 "$CONTAINER_ENV"
+for var in PENPOT_ORIGIN PENPOT_FILE_URL PENPOT_EMAIL PENPOT_PASSWORD \
+           PENPOT_MCP_MODE PENPOT_MCP_WS_URI PENPOT_MCP_WEBSOCKET_PORT \
+           PENPOT_BROWSER_CHANNEL PENPOT_CLEAR_CACHE PENPOT_HOST_HEADLESS; do
+    [[ -n "${!var:-}" ]] && printf '%s=%s\n' "$var" "${!var}" >>"$CONTAINER_ENV" || true
+done
+docker_args+=(--env-file "$CONTAINER_ENV")
+
+echo "[run] browser      in $WORKER_IMAGE"
+login=""
+[[ -n "${PENPOT_EMAIL:-}" && -n "${PENPOT_PASSWORD:-}" ]] && login="node spikes/login.js >/dev/null 2>&1 || true; "
+# Not exec: cleanup() has to run to remove the env file.
+docker run "${docker_args[@]}" "$WORKER_IMAGE" \
+    bash -lc "${login}exec node host.js"

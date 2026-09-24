@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""Create and configure an MCP worker account, and write its env file.
+
+A worker is a Penpot account like any other, with a password so it can log in
+without a human.  People log in through Authelia instead; this is the one kind
+of account that needs a password, and keeping it separate bounds what a leaked
+worker credential reaches.
+
+  provision-worker --email worker-a@penpot.local
+  provision-worker --email worker-a@penpot.local --invite '<link or token>'
+  provision-worker --email worker-a@penpot.local --reset-password \
+      --invite '<team one>' --invite '<team two>'
+
+The invite is how a worker reaches documents it does not own.  Invite the
+worker from Penpot (Team > Invitations), copy the link, and pass it here; the
+worker accepts it and can then drive that team's files.  Without one it only
+sees its own scratch project.
+
+Re-running is safe and is the way to add a team, rotate the MCP token, or
+rewrite a lost env file.  The profile is only created once; --reset-password
+sets a new password on an account that already exists, and an invitation that
+has already been accepted is ignored rather than treated as an error.
+
+Stdlib only.  Runs `docker compose exec penpot-backend python3 manage.py` to
+create the profile, then talks to the RPC API for the rest.
+"""
+
+import argparse
+import json
+import re
+import secrets
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+WORKER_DIR = HERE / "worker"
+TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_.-]{20,}")
+
+
+def rpc(origin, command, payload, cookie=None):
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if cookie:
+        headers["Cookie"] = cookie
+    request = urllib.request.Request(
+        f"{origin}/api/rpc/command/{command}", data=json.dumps(payload).encode(), headers=headers
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        body = response.read().decode()
+        return (json.loads(body) if body.strip() else None), response.headers.get("Set-Cookie", "")
+
+
+def login(origin, email, password):
+    profile, set_cookie = rpc(origin, "login-with-password", {"email": email, "password": password})
+    # Secure cookie over loopback http: browsers send it, http.cookiejar does
+    # not, so it is carried by hand here.
+    match = re.search(r"(auth-token=[^;]+)", set_cookie or "")
+    if not match:
+        raise RuntimeError("login returned no auth-token cookie")
+    return profile, match.group(1)
+
+
+def manage(*args):
+    result = subprocess.run(
+        ["docker", "compose", "exec", "-T", "penpot-backend", "python3", "manage.py", *args],
+        cwd=HERE, capture_output=True, text=True,
+    )
+    return result.returncode, (result.stdout + result.stderr).strip()
+
+
+def create_profile(name, email, password, reset):
+    """Create the profile, or reset an existing one's password when asked.
+
+    Re-running provisioning is normal -- a token is regenerated, an env file is
+    rewritten -- but the password only lives in the env file, so a profile that
+    already exists cannot be logged into with a fresh one. Resetting is a real
+    change to an account, so it stays behind a flag.
+    """
+    code, output = manage("create-profile", "-n", name, "-e", email, "-p", password,
+                          "--skip-tutorial", "--skip-walkthrough")
+    if code == 0:
+        return output
+    if "already exists" not in output.lower():
+        raise RuntimeError("create-profile failed: %s" % output[:300])
+    if not reset:
+        raise RuntimeError(
+            "%s already exists. Its password is only in its env file; pass "
+            "--reset-password to set a new one, or --password to reuse the old." % email
+        )
+    code, output = manage("update-profile", "-e", email, "-p", password)
+    if code != 0:
+        raise RuntimeError("update-profile failed: %s" % output[:300])
+    return "Reset password for %s" % email
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--email", required=True)
+    parser.add_argument("--password", help="default: generated")
+    parser.add_argument("--reset-password", action="store_true",
+                        help="if the account exists, set its password to the new one")
+    parser.add_argument("--name", default=None, help="display name; default derived from the email")
+    parser.add_argument("--origin", default="http://localhost:9001")
+    parser.add_argument("--invite", action="append", default=[], metavar="LINK",
+                        help="invitation link or token; repeat to join several teams")
+    parser.add_argument("--file-name", default="worker-scratch", help="scratch file to create; '' to skip")
+    parser.add_argument("--env-out", default=None, help="default: worker/<local part of email>.env")
+    args = parser.parse_args()
+
+    password = args.password or secrets.token_urlsafe(18)
+    name = args.name or args.email.split("@")[0]
+    env_out = Path(args.env_out) if args.env_out else WORKER_DIR / f"{args.email.split('@')[0]}.env"
+
+    print(create_profile(name, args.email, password, args.reset_password))
+    profile, cookie = login(args.origin, args.email, password)
+    print("logged in as", args.email)
+
+    for invite in args.invite:
+        match = TOKEN_RE.search(invite)
+        if not match:
+            print("could not find a token in --invite %s" % invite[:40], file=sys.stderr)
+            return 2
+        try:
+            joined, _ = rpc(args.origin, "verify-token", {"token": match.group(0)}, cookie)
+            print("joined team:", (joined or {}).get("teamId"), "as", (joined or {}).get("role"))
+        except urllib.error.HTTPError as exc:
+            # A worker belongs to as many teams as it has been invited to, and
+            # re-running provisioning is normal, so an invitation that is spent
+            # or already accepted is not a failure.
+            body = exc.read().decode(errors="replace")
+            if exc.code == 400 and ("invalid-token" in body or "already" in body):
+                print("invitation already used or expired; leaving membership as it is")
+            else:
+                raise
+    if args.invite:
+        profile, cookie = login(args.origin, args.email, password)
+
+    # MCP off by default; the token is what the plugin presents, and creating
+    # one deletes any previous mcp token for this profile.
+    token, _ = rpc(args.origin, "create-access-token", {"name": "MCP", "type": "mcp"}, cookie)
+    rpc(args.origin, "update-profile-props",
+        {"props": {"mcpEnabled": True, "onboardingViewed": True, "releaseNotesViewed": "2.17"}}, cookie)
+    print("MCP enabled, token minted")
+
+    team_id = profile["defaultTeamId"]
+    file_id = ""
+    if args.file_name:
+        created, _ = rpc(args.origin, "create-file",
+                         {"name": args.file_name, "projectId": profile["defaultProjectId"]}, cookie)
+        file_id = created["id"]
+        print("scratch file:", args.file_name, file_id)
+
+    env_out.parent.mkdir(parents=True, exist_ok=True)
+    env_out.write_text(
+        "# Generated by provision-worker. Holds a password and an MCP token.\n"
+        f'PENPOT_ORIGIN="{args.origin}"\n'
+        f'PENPOT_EMAIL="{args.email}"\n'
+        f'PENPOT_PASSWORD="{password}"\n'
+        "# Both ids are required: a workspace URL with only file-id renders an\n"
+        "# empty page. run-mcp-worker.py rewrites them per document.\n"
+        f'PENPOT_FILE_URL="{args.origin}/#/workspace?team-id={team_id}&file-id={file_id}"\n'
+        f'PENPOT_MCP_URL="{args.origin}/mcp/stream?userToken={token["token"]}"\n'
+        f'PENPOT_PROFILE_DIR="$HOME/.cache/penpot-headless/profile-{args.email.split("@")[0]}"\n'
+    )
+    env_out.chmod(0o600)
+    print("wrote", env_out)
+    print("\nNext: ./run-mcp-worker.py   (the account appears in the Account field)")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (urllib.error.HTTPError, urllib.error.URLError, RuntimeError, KeyError) as exc:
+        print("failed: %s" % exc, file=sys.stderr)
+        sys.exit(1)

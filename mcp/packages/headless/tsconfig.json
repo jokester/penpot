@@ -1,0 +1,31 @@
+{
+    "compilerOptions": {
+        "target": "ES2023",
+        "lib": ["ES2023"],
+        "module": "NodeNext",
+        "moduleResolution": "nodenext",
+        "types": ["node"],
+
+        /* Node runs the sources as they are: it strips types and resolves the
+           .ts extensions we write, and tsc only ever checks them. */
+        "allowImportingTsExtensions": true,
+        "erasableSyntaxOnly": true,
+        "verbatimModuleSyntax": true,
+        "isolatedModules": true,
+        "noEmit": true,
+
+        "skipLibCheck": true,
+        "forceConsistentCasingInFileNames": true,
+        "resolveJsonModule": true,
+
+        /* Linting. noUncheckedIndexedAccess is not gratuitous: the port
+           allocator and the /proc parser both index arrays, and both shipped
+           bugs. */
+        "strict": true,
+        "noUncheckedIndexedAccess": true,
+        "noUnusedLocals": true,
+        "noUnusedParameters": true,
+        "noFallthroughCasesInSwitch": true
+    },
+    "include": ["src"]
+}

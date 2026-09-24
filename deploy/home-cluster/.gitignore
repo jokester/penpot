@@ -1,0 +1,9 @@
+# Real configuration: secrets, hostnames, tokens. Only the examples are tracked.
+.env
+worker/*.env
+# and anything derived from one: a backup is still a password on disk
+worker/*.env.*
+!worker/*.env.example
+worker/worker.log
+worker/worker.pid
+__pycache__/

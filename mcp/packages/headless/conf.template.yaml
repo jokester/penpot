@@ -1,0 +1,109 @@
+# mcp-headless, one deployment described in one file.
+#
+# Copy to ~/.config/mcp-headless/conf.yaml (or pass --config DIR) and edit.
+# Command-line flags still win over everything here.
+#
+# NO SECRETS LIVE HERE. A worker's password and MCP token are written to
+# accounts/<name>.env beside this file, mode 600, by
+# `mcp-headless provision-worker-user`. That is what makes this file safe to
+# commit, diff, and paste into an issue.
+#
+# Unknown keys are refused rather than ignored: a mistyped key that reads as
+# present and changes nothing is the worst way a hand-written file can fail.
+
+# The Penpot instance. This is the origin the headless browser loads, so it
+# must be one a Secure session cookie survives: loopback, or https. A LAN
+# address drops the cookie silently while the login appears to succeed.
+penpot:
+    url: http://127.0.0.1:9001
+
+# The worker pool. A worker is the one kind of Penpot account with a password:
+# people sign in through an identity provider and a headless browser cannot.
+#
+# ONE LANE TAKES ONE WORKER and holds it until the lane closes, so the number
+# of workers is a ceiling on concurrent documents, alongside the port range
+# below. Separate identities are the point -- two agents editing adjacent
+# documents as the same Penpot user see each other's presence and selections,
+# which reads as the application misbehaving.
+#
+# `name` is the account file's name and what --account takes; it defaults to
+# the local part of the email. `fullName` is the display name in Penpot.
+# Provisioning with no --email creates every worker named here that has no
+# account file yet.
+workerUsers:
+    - name: worker-a
+      email: worker-a@penpot.local
+      fullName: worker a
+    - name: worker-b
+      email: worker-b@penpot.local
+
+# Where the agent connects. One address for every document: which document a
+# call is about is an argument, not a port.
+#
+# The endpoint is UNAUTHENTICATED -- anything that reaches it drives your
+# documents as a worker -- so 127.0.0.1 is the default. Widen it only where
+# reaching the host is already controlled.
+mcpFacade:
+    host: 127.0.0.1
+    port: 4600
+
+mcpBackend:
+    type: kubectl # or: docker-compose
+
+    # Where a lane's ports appear. Both halves need it: the browser dials the
+    # WebSocket and the agent connects to the HTTP port.
+    hostname: 127.0.0.1
+
+    # Ports the host reaches, consumed IN PAIRS -- HTTP and WebSocket per lane
+    # -- so 4601-4608 is four concurrent documents, not eight.
+    portRange: 4601-4608
+
+    # The ports the container actually binds, when they are not the same ones.
+    # Omit it unless the range you want is taken on this host: the two must be
+    # the same length, and the mapping is a constant offset.
+    # upstreamPortRange: 4601-4608
+
+    # How an in-container port becomes reachable here.
+    #   none          already node-local -- a hostPort or a node-local Service.
+    #                 The good case: nothing to own, nothing to leak.
+    #   port-forward  one `kubectl port-forward` child process per lane. For a
+    #                 launcher outside the cluster with no other route in.
+    exposure: none
+
+    kubectl:
+        namespace: penpot
+        # Resolved by label on every call, because a pod's name changes on
+        # every restart.
+        selector: app=penpot-mcp
+        # Where manage.py lives; only provisioning asks. Default as shown.
+        adminSelector: app=penpot-backend
+        # context: home
+        # kubeconfig: /home/you/.kube/config
+
+    # Used instead of `kubectl:` when type is docker-compose.
+    # dockerCompose:
+    #     projectDir: /path/to/deploy/home-cluster
+    #     service: penpot-mcp
+    #     adminService: penpot-backend
+
+browserBackend:
+    # local: Playwright on this host, the build the lockfile pins.
+    # container is documented in SPEC 14.3 and not built.
+    type: local
+
+    # Show the browser instead of running it headless.
+    #
+    # This is the ONLY way to watch the lanes the façade opens: --headed is a
+    # lane flag, and the façade names no lanes on a command line. Refused at
+    # startup if no display is set, rather than when a browser fails to launch.
+    headed: false
+
+    # The X display headed lanes go on. Defaults to $DISPLAY.
+    # display: ":0"
+
+    # A Playwright channel -- chrome, msedge -- instead of the pinned build.
+    # Overrides $PENPOT_BROWSER_CHANNEL.
+    # channel: chrome
+
+    # Extra arguments for the browser process. Overrides $PENPOT_BROWSER_ARGS.
+    # args: ["--force-device-scale-factor=1"]

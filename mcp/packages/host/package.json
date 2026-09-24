@@ -1,0 +1,22 @@
+{
+    "name": "@penpot/mcp-host",
+    "version": "0.0.0",
+    "private": true,
+    "type": "module",
+    "description": "Server-owned headless browser hosting the Penpot MCP plugin, so the MCP server does not depend on a user's tab.",
+    "scripts": {
+        "start": "node host.js",
+        "smoke": "node smoke.js",
+        "login": "node spikes/login.js",
+        "verify": "node spikes/verify.js",
+        "diagnose": "node spikes/diagnose.js",
+        "spike:pna": "node spikes/spike-pna.js"
+    },
+    "dependencies": {
+        "playwright": "^1.62.1"
+    },
+    "devDependencies": {
+        "@modelcontextprotocol/sdk": "^1.25.3",
+        "ws": "^8.21.3"
+    }
+}

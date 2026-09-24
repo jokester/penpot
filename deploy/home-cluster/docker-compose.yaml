@@ -1,0 +1,249 @@
+## Penpot for a home cluster: Authelia SSO for people, a private path for the
+## MCP worker.
+##
+## Derived from docker/images/docker-compose.yaml. Read HANDOFF.md before
+## changing anything here; several values look arbitrary and are not.
+##
+## ONE frontend serves both the public hostname and the worker's loopback
+## origin, by setting no PENPOT_PUBLIC_URI at all. The entrypoint writes
+## `var penpotPublicURI` into js/config.js only when that variable is non-empty,
+## and app.config/public-uri falls back to location.origin when it is absent
+## (frontend/src/app/config.cljs:181). Every derived URL follows, mcp-ws-uri
+## included, so each browser gets the origin it actually arrived on.
+##
+## This deployment used to run two frontends because one baked-in
+## PENPOT_PUBLIC_URI cannot serve two origins. Dropping the variable removes the
+## need, and with it the edge-cache trap: js/config.js no longer differs by
+## origin, so a CDN caching it cannot serve the wrong one.
+##
+## The backend keeps its own PENPOT_PUBLIC_URI. That one is real -- it builds
+## email links and the OIDC redirect_uri, which must name the public host.
+
+networks:
+  penpot:
+
+volumes:
+  penpot_postgres_v15:
+  penpot_assets:
+
+services:
+  ## ----------------------------------------------------------------- frontend
+
+  # THIS is the service the Cloudflare tunnel connects to, on
+  # ${PENPOT_PUBLIC_PORT}. It also publishes ${PENPOT_LOCAL_PORT} on loopback for
+  # the MCP worker -- same container, same nginx, two ways in.
+  #
+  # Anything that can reach the public port skips Cloudflare Access, so on a
+  # shared LAN the gate is only as good as the network. Set PENPOT_BIND=127.0.0.1
+  # and run cloudflared on this host if you want that closed.
+  #
+  # The worker's port stays on loopback because hardened session cookies are
+  # Secure, and a browser only keeps those for a trustworthy origin. localhost
+  # qualifies over plain http; a LAN hostname does not. A worker on another
+  # machine SSH-forwards this port and still calls it localhost.
+  #
+  # No PENPOT_PUBLIC_URI here on purpose -- see the header.
+  penpot-frontend:
+    image: "penpotapp/frontend:${PENPOT_VERSION}"
+    restart: always
+    ports:
+      - "${PENPOT_BIND}:${PENPOT_PUBLIC_PORT}:8080"
+      - "127.0.0.1:${PENPOT_LOCAL_PORT}:8080"
+    volumes:
+      - penpot_assets:/opt/data/assets
+    depends_on: [penpot-backend, penpot-exporter, penpot-mcp]
+    networks: [penpot]
+    environment:
+      # One flag set now serves both origins. enable-login-with-password shows
+      # the password form, which the worker path needs; the public page shows it
+      # too. That is cosmetic either way -- the backend always accepts passwords,
+      # and Cloudflare Access is the real gate on the public port.
+      #
+      # enable-wasm-export is here rather than in PENPOT_FLAGS_BASE on purpose.
+      # The backend ignores it, and putting it in the shared string would
+      # recreate penpot-backend for a frontend-only rendering change -- which
+      # means interrupting whatever the workers are doing. Scoped here, a
+      # `docker compose up -d` touches only this service.
+      #
+      # What it fixes: export_shape. Without it the plugin's shape.export()
+      # round-trips through penpot-exporter, and the asset URL that comes back
+      # names PENPOT_HOST -- which a worker talking to localhost cannot fetch,
+      # so every export dies on "unable to perform fetch operation". With it,
+      # png/jpeg/webp render in the browser to a blob: URI and never leave it
+      # (frontend/src/app/main/data/exports/wasm.cljs:14). SVG is unaffected:
+      # the plugin's wasm branch covers only those three types, so SVG still
+      # goes through the exporter and still fails on a worker.
+      #
+      # Only helps files carrying the render-wasm/v1 feature, which is assigned
+      # at file creation. Check with:
+      #   select name, features from file where name = '...';
+      PENPOT_FLAGS: !!str >-
+        ${PENPOT_FLAGS_BASE}
+        enable-login-with-password
+        enable-wasm-export
+      PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "${PENPOT_MAX_BODY}"
+      PENPOT_HTTP_SERVER_MAX_MULTIPART_BODY_SIZE: "${PENPOT_MAX_BODY}"
+
+  ## ------------------------------------------------------------------ backend
+
+  penpot-backend:
+    image: "penpotapp/backend:${PENPOT_VERSION}"
+    restart: always
+    volumes:
+      - penpot_assets:/opt/data/assets
+      # enable-rpc-climit needs a config file the image does not ship. See the
+      # header of climit.edn.
+      - "./climit.edn:/opt/penpot/backend/climit.edn:ro"
+    depends_on:
+      penpot-postgres: {condition: service_healthy}
+      penpot-valkey: {condition: service_healthy}
+    networks: [penpot]
+    environment:
+      # The backend enforces auth; it keeps login-with-password enabled (default)
+      # so the worker account can log in non-interactively.
+      PENPOT_FLAGS: "${PENPOT_FLAGS_BASE}"
+      # Emails and the OIDC redirect_uri are built from this, so it is the
+      # PUBLIC host even though one frontend is loopback.
+      PENPOT_PUBLIC_URI: "https://${PENPOT_HOST}"
+      PENPOT_SECRET_KEY: "${PENPOT_SECRET_KEY}"
+      PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "${PENPOT_MAX_BODY}"
+      PENPOT_HTTP_SERVER_MAX_MULTIPART_BODY_SIZE: "${PENPOT_MAX_BODY}"
+
+      PENPOT_DATABASE_URI: postgresql://penpot-postgres/penpot
+      PENPOT_DATABASE_USERNAME: penpot
+      PENPOT_DATABASE_PASSWORD: "${POSTGRES_PASSWORD}"
+      PENPOT_REDIS_URI: redis://penpot-valkey/0
+
+      PENPOT_OBJECTS_STORAGE_BACKEND: fs
+      PENPOT_OBJECTS_STORAGE_FS_DIRECTORY: /opt/data/assets
+
+      # Absolute on purpose: the default is the relative "resources/climit.edn",
+      # which resolves against the working directory and does not exist there.
+      PENPOT_RPC_CLIMIT_CONFIG: /opt/penpot/backend/climit.edn
+
+      PENPOT_TELEMETRY_ENABLED: "false"
+
+      ## ---- Authelia OIDC.
+      ## Endpoints are set explicitly rather than autodiscovered: the browser
+      ## and this container reach Authelia over different paths, and
+      ## autodiscovery can only return one hostname. Values below were read from
+      ## https://id.ihate.work/.well-known/openid-configuration on 2026-09-18.
+      PENPOT_OIDC_CLIENT_ID: "${PENPOT_OIDC_CLIENT_ID}"
+      PENPOT_OIDC_CLIENT_SECRET: "${PENPOT_OIDC_CLIENT_SECRET}"
+      PENPOT_OIDC_BASE_URI: "${AUTHELIA_PUBLIC_URI}/"
+      # Browser-facing.
+      PENPOT_OIDC_AUTH_URI: "${AUTHELIA_PUBLIC_URI}/api/oidc/authorization"
+      # Server-to-server. Point these at whatever this container can resolve;
+      # they may be identical to the public host if there is no internal route.
+      PENPOT_OIDC_TOKEN_URI: "${AUTHELIA_INTERNAL_URI}/api/oidc/token"
+      PENPOT_OIDC_USER_URI: "${AUTHELIA_INTERNAL_URI}/api/oidc/userinfo"
+      PENPOT_OIDC_JWKS_URI: "${AUTHELIA_INTERNAL_URI}/jwks.json"
+      # Without this the backend refuses to call the provider at all.
+      PENPOT_SSRF_ALLOWED_HOSTS: "${PENPOT_SSRF_ALLOWED_HOSTS}"
+      # Optional: restrict who may log in, by Authelia group.
+      # PENPOT_OIDC_ROLES_ATTR: groups
+      # PENPOT_OIDC_ROLES: "penpot"
+
+      ## ---- Mail. Defaults to the local catcher; no mail leaves the host.
+      ## Replace with a real relay if you want password resets to work.
+      PENPOT_SMTP_DEFAULT_FROM: "${PENPOT_SMTP_FROM}"
+      PENPOT_SMTP_DEFAULT_REPLY_TO: "${PENPOT_SMTP_FROM}"
+      PENPOT_SMTP_HOST: penpot-mailcatch
+      PENPOT_SMTP_PORT: 1025
+      PENPOT_SMTP_TLS: "false"
+      PENPOT_SMTP_SSL: "false"
+
+  ## ----------------------------------------------------------------- services
+
+  penpot-mcp:
+    image: "penpotapp/mcp:${PENPOT_VERSION}"
+    restart: always
+    networks: [penpot]
+    environment:
+      # Suppress the REPL. The 2.17 bundle constructs its ReplServer
+      # unconditionally (index.js, `new ReplServer(...)`) and has no
+      # PENPOT_MCP_REPL_ENABLE -- that gate only exists in later builds. It does
+      # honour PENPOT_MCP_REPL_PORT, so pointing the REPL at the port the MCP
+      # server itself binds first makes the listen lose the race. Measured: the
+      # MCP endpoint answers normally, `/` returns the MCP server's 404 instead
+      # of the REPL console, no extra socket appears, and the process stays up.
+      # The failure is silent -- the log still says "REPL server started".
+      #
+      # To evaluate the REPL later, start a throwaway server beside this one and
+      # give it a port of its own; nothing here needs changing:
+      #   docker compose exec -e PENPOT_MCP_SERVER_PORT=4699 \
+      #       -e PENPOT_MCP_WEBSOCKET_PORT=4698 -e PENPOT_MCP_REPL_PORT=4403 \
+      #       penpot-mcp node index.js
+      # then reach it from inside the container, which is the only place it is
+      # routable: `docker compose exec penpot-mcp curl 127.0.0.1:4403/`.
+      PENPOT_MCP_REPL_PORT: "4401"
+    # A port range for per-document servers started with `docker compose exec`
+    # inside this container. exec'd servers inherit the image's
+    # PENPOT_MCP_SERVER_HOST=0.0.0.0, so they are reachable on these.
+    #
+    # Publishing is NOT free, contrary to what this comment used to claim.
+    # Docker runs one docker-proxy process per published port, measured at
+    # ~6.9 MB resident whether or not anything is behind it -- so this range
+    # costs ~110 MB standing. Two ports per lane, hence eight lanes. Widen it
+    # when eight documents under simultaneous agent control is the constraint,
+    # and know what each port costs.
+    ports:
+      - "${PENPOT_DOC_BIND:-127.0.0.1}:${PENPOT_DOC_PORT_MIN:-4601}-${PENPOT_DOC_PORT_MAX:-4616}:${PENPOT_DOC_PORT_MIN:-4601}-${PENPOT_DOC_PORT_MAX:-4616}"
+
+  penpot-exporter:
+    image: "penpotapp/exporter:${PENPOT_VERSION}"
+    restart: always
+    depends_on:
+      penpot-valkey: {condition: service_healthy}
+    networks: [penpot]
+    environment:
+      PENPOT_FLAGS: "${PENPOT_FLAGS_BASE}"
+      PENPOT_SECRET_KEY: "${PENPOT_SECRET_KEY}"
+      PENPOT_PUBLIC_URI: "https://${PENPOT_HOST}"
+      # Internal only; the exporter renders through the frontend's nginx.
+      PENPOT_INTERNAL_URI: http://penpot-frontend:8080
+      PENPOT_REDIS_URI: redis://penpot-valkey/0
+
+  penpot-postgres:
+    image: "postgres:15"
+    restart: always
+    stop_signal: SIGINT
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U penpot"]
+      interval: 2s
+      timeout: 10s
+      retries: 5
+      start_period: 2s
+    volumes:
+      - penpot_postgres_v15:/var/lib/postgresql/data
+    networks: [penpot]
+    environment:
+      - POSTGRES_INITDB_ARGS=--data-checksums
+      - POSTGRES_DB=penpot
+      - POSTGRES_USER=penpot
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+
+  penpot-valkey:
+    image: valkey/valkey:8.1
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli ping | grep PONG"]
+      interval: 1s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+    networks: [penpot]
+    environment:
+      - VALKEY_EXTRA_FLAGS=--maxmemory 128mb --maxmemory-policy volatile-lfu
+
+  ## Mail catcher. Its web UI shows EVERY message the instance sends, including
+  ## password-reset links, so whoever opens it can take over any account. It has
+  ## its own bind address, defaulting to loopback, and should keep it. Never
+  ## route it through the tunnel.
+  penpot-mailcatch:
+    image: sj26/mailcatcher:latest
+    restart: always
+    expose: ['1025']
+    ports:
+      - "${PENPOT_MAILCATCH_BIND}:${PENPOT_MAILCATCH_PORT}:1080"
+    networks: [penpot]
