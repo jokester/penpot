@@ -243,3 +243,36 @@ test("MCP is switched on, because a worker's token is useless without it", async
 
     assert.ok(h.calls.includes("enableMcp"));
 });
+
+test("re-provisioning keeps the scratch document instead of making another", async () => {
+    // Re-running is how a worker is added to a team, and doing that three
+    // times should not leave three scratch files behind.
+    const h = harness({
+        profile: "exists",
+        files: {
+            "/cfg/accounts/worker-a.env":
+                'PENPOT_ORIGIN="http://x"\nPENPOT_PASSWORD="old-pw"\n' +
+                'PENPOT_FILE_URL="http://x/#/workspace?team-id=11111111-1111-4111-8111-111111111111' +
+                '&file-id=22222222-2222-4222-8222-222222222222"\n',
+        },
+    });
+
+    const report = await provisionWorker({ ...REQUEST, invitations: ["link"] }, h.deps);
+
+    assert.equal(report.fileId, "22222222-2222-4222-8222-222222222222");
+    assert.ok(!h.calls.some((call) => call.startsWith("createFile")), "made a second scratch document");
+});
+
+test("an account file with no document still gets one", async () => {
+    // Provisioned once with --file-name '' and now wanted: the absence is not
+    // a decision to remember forever.
+    const h = harness({
+        profile: "exists",
+        files: { "/cfg/accounts/worker-a.env": 'PENPOT_ORIGIN="http://x"\nPENPOT_PASSWORD="old-pw"\n' },
+    });
+
+    const report = await provisionWorker(REQUEST, h.deps);
+
+    assert.equal(report.fileId, FILE);
+    assert.ok(h.calls.includes("createFile worker-scratch"));
+});

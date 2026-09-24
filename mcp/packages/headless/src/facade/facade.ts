@@ -155,7 +155,11 @@ export class Facade {
 
     /** Every document any worker can drive, by name. */
     async listDocuments(signal: AbortSignal): Promise<{ documents: readonly string[]; problem: string | null }> {
-        const seen = await this.#visible(signal);
+        // Always fresh. This is the "what is there?" call, and the catalogue
+        // remembers an account's documents for the life of the process -- so a
+        // worker invited to a team while the launcher is up would never appear,
+        // and the only cure would be a restart nobody would think of.
+        const seen = await this.#visible(signal, true);
         return {
             documents: [...seen.values()].map((entry) => describeChoice(entry.choice)),
             problem: seen.size === 0 ? (this.#problem ?? "no worker can see any documents") : null,
@@ -233,7 +237,26 @@ export class Facade {
     }
 
     async #resolve(query: string, signal: AbortSignal): Promise<{ choice: DocumentChoice; eligible: string[] }> {
-        const seen = await this.#visible(signal);
+        try {
+            return this.#pick(query, await this.#visible(signal));
+        } catch (err) {
+            // A document the worker was given access to a moment ago is not in
+            // the remembered list, and "no such document" would be a lie the
+            // agent cannot act on. One retry against a fresh list; if it still
+            // is not there, the original refusal stands.
+            const fresh = await this.#visible(signal, true);
+            try {
+                return this.#pick(query, fresh);
+            } catch {
+                throw err;
+            }
+        }
+    }
+
+    #pick(
+        query: string,
+        seen: Map<string, { choice: DocumentChoice; accounts: string[] }>
+    ): { choice: DocumentChoice; eligible: string[] } {
         if (seen.size === 0) {
             fail("not-configured", this.#problem ?? "no worker can see any documents", {});
         }
@@ -252,11 +275,15 @@ export class Facade {
      * invited to is still drivable, and listing only worker-a's would hide it.
      * Deduplicated by file id, so a document two workers share appears once.
      */
-    async #visible(signal: AbortSignal): Promise<Map<string, { choice: DocumentChoice; accounts: string[] }>> {
+    async #visible(
+        signal: AbortSignal,
+        fresh = false
+    ): Promise<Map<string, { choice: DocumentChoice; accounts: string[] }>> {
         const seen = new Map<string, { choice: DocumentChoice; accounts: string[] }>();
         const problems: string[] = [];
 
         for (const account of this.#deps.accounts) {
+            if (fresh) this.#deps.catalogue.forget(account.name);
             const result = await this.#deps.catalogue.forAccount(account, signal);
             if (result.problem !== null) problems.push(`${account.name}: ${result.problem}`);
 

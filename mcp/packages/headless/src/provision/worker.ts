@@ -12,7 +12,7 @@
 // when someone asks in as many words.
 
 import { parseAccount } from "../core/config.ts";
-import type { ConfigIo } from "../core/config.ts";
+import type { Account, ConfigIo } from "../core/config.ts";
 import { fail } from "../core/errors.ts";
 import { normalizeOrigin } from "../core/target.ts";
 import type { PenpotApi } from "../penpot/rpc.ts";
@@ -116,10 +116,15 @@ export async function provisionWorker(request: WorkerRequest, deps: WorkerDeps):
     await deps.api.enableMcp(origin, session);
     deps.log(`MCP enabled, token ${token.how}`);
 
-    let fileId = "";
-    if (request.fileName !== "") {
+    // Re-running is how a worker is added to a team, and that must not leave a
+    // second scratch document behind every time. The account file already
+    // names the one it was given, so an account being re-provisioned keeps it.
+    let fileId = known?.defaultDocument?.fileId ?? "";
+    if (request.fileName !== "" && fileId === "") {
         fileId = await deps.api.createFile(origin, session, profile.defaultProjectId, request.fileName);
         deps.log(`scratch document ${request.fileName} ${fileId}`);
+    } else if (fileId !== "") {
+        deps.log(`keeping the scratch document it already has (${fileId.slice(-8)})`);
     }
 
     await deps.write(
@@ -167,7 +172,7 @@ async function mcpToken(
 }
 
 /** The account file as it already stands, or undefined when there is none. */
-function existing(path: string, deps: WorkerDeps): { readonly password?: string } | undefined {
+function existing(path: string, deps: WorkerDeps): Account | undefined {
     const text = deps.io.read(path);
     if (text === null) return undefined;
     try {
@@ -179,7 +184,7 @@ function existing(path: string, deps: WorkerDeps): { readonly password?: string 
 
 /** Which password to use, and where it came from. */
 function password(
-    known: { readonly password?: string } | undefined,
+    known: Account | undefined,
     deps: WorkerDeps
 ): { value: string; source: "environment" | "account file" | "generated" } {
     const fromEnv = deps.env.MCP_HEADLESS_WORKER_PASSWORD;

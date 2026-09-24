@@ -335,3 +335,54 @@ test("a document with a unique name keeps it", async () => {
         listed.documents.join(", ")
     );
 });
+
+test("listing documents always asks again, so a new share is visible", async () => {
+    // The catalogue remembers an account's documents for the life of the
+    // process. A worker invited to a team while the launcher is up would never
+    // appear, and the only cure would be a restart nobody would think of.
+    let served: DocumentChoice[] = [];
+    const forgotten: string[] = [];
+    const catalogue: Catalogue = {
+        forAccount: async () => ({ documents: served, problem: null }),
+        cached: () => ({ documents: served, problem: null }),
+        forget: (name) => forgotten.push(name),
+    };
+    const f = build({ catalogue });
+
+    assert.deepEqual((await f.facade.listDocuments(AbortSignal.timeout(1_000))).documents, []);
+
+    served = [{ fileId: "f1", teamId: "t1", fileName: "shared", teamName: "Team", modifiedAt: "" }];
+    const after = await f.facade.listDocuments(AbortSignal.timeout(1_000));
+
+    assert.deepEqual(after.documents, ["Team / shared"]);
+    assert.ok(forgotten.length >= 2, "each listing should drop what it remembered");
+});
+
+test("connecting to a document just shared retries against a fresh list", async () => {
+    // Otherwise "no such document" is a lie the agent cannot act on: it was
+    // told about the file by a person, and the launcher is holding a list from
+    // before the share.
+    let served: DocumentChoice[] = [];
+    const catalogue: Catalogue = {
+        forAccount: async () => ({ documents: served, problem: null }),
+        cached: () => ({ documents: served, problem: null }),
+        forget: () => {
+            // The share lands between the stale read and the retry.
+            served = [{ fileId: "f9", teamId: "t1", fileName: "late", teamName: "Team", modifiedAt: "" }];
+        },
+    };
+    const f = build({ catalogue });
+
+    const connected = await f.facade.connectDoc("s1", "late", AbortSignal.timeout(5_000));
+
+    assert.equal(connected.fileId, "f9");
+});
+
+test("a document that is genuinely absent still refuses, with the first reason", async () => {
+    const f = build();
+
+    await refuses(
+        () => f.facade.connectDoc("s1", "nothing-like-this", AbortSignal.timeout(5_000)),
+        "no document matches"
+    );
+});
