@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { chromium, type BrowserContext, type Page } from "playwright";
 
 import type { AccountRef } from "../core/target.ts";
+import { rehostedAsset } from "./assets.ts";
 import type { BrowserKey, BrowserSession, Launch, Lease, LeaseInit } from "./pool.ts";
 import type { OpenSessionContext, SessionContext } from "./session.ts";
 import { watchPluginSocket } from "./page.ts";
@@ -90,8 +91,55 @@ export function playwrightLaunch(options: LaunchOptions = {}): Launch {
             await context.grantPermissions(["local-network-access"], { origin: init.account.origin });
         }
 
+        await rehostAssets(context, init.account.origin);
+
         return new PlaywrightSession(context, options.settleMs);
     };
+}
+
+/**
+ * Sends the page's cross-origin asset fetches back to its own origin.
+ *
+ * Why at all is in `browser/assets.ts`; in short, the backend addresses them
+ * with its one public URI and the worker is not on it. The decision lives
+ * there as a pure function, so this half has nothing to decide.
+ *
+ * Fulfilled rather than redirected. `route.continue({url})` leaves the page
+ * thinking it made a cross-origin request, so the response is judged against
+ * CORS and the cookie is withheld; fetching through `context.request` uses the
+ * context's own cookie jar and hands the bytes back as if the original URL had
+ * simply worked.
+ */
+async function rehostAssets(context: BrowserContext, origin: string): Promise<void> {
+    await context.route(
+        (url) => rehostedAsset(url.toString(), origin) !== null,
+        async (route) => {
+            const target = rehostedAsset(route.request().url(), origin);
+            if (target === null) {
+                await route.fallback();
+                return;
+            }
+            try {
+                const response = await context.request.fetch(target, { method: route.request().method() });
+                const body = await response.body();
+
+                // Headers minus the two that describe the transfer rather than
+                // the content. `body()` is already decoded, so passing the
+                // original content-encoding tells the browser to decode it
+                // again -- which yields nothing, silently. Measured: a 524-byte
+                // SVG arrived as 2 bytes.
+                const headers = { ...response.headers() };
+                delete headers["content-encoding"];
+                delete headers["content-length"];
+
+                await route.fulfill({ status: response.status(), headers, body });
+            } catch {
+                // Let it fail as it would have. A rewrite that cannot be
+                // served is not a reason to invent an error of our own.
+                await route.fallback();
+            }
+        }
+    );
 }
 
 /** One persistent context, handing out tabs. */
