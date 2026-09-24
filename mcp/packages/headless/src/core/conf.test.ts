@@ -143,7 +143,7 @@ test("a container browser is refused as not built, not as unknown", async () => 
 test("an empty file is a file with nothing in it, not an error", async () => {
     // A configuration directory that has the file and has not filled it in
     // yet should behave exactly as one that has no file.
-    assert.deepEqual(parseConf(""), { workerUsers: [], browser: { type: "local" } });
+    assert.deepEqual(parseConf(""), { workerUsers: [], browser: { type: "local", headed: false } });
 });
 
 test("broken YAML names the file and the first thing wrong with it", async () => {
@@ -158,4 +158,37 @@ test("the committed template parses, and is the shape the docs describe", async 
 
     assert.ok(conf.mcpBackend !== undefined, "the template should describe a backend");
     assert.ok(conf.workerUsers.length > 0, "the template should name at least one worker");
+});
+
+test("the browser can be asked to show itself", async () => {
+    // The only way to watch the lanes the façade opens: nothing names them on
+    // a command line, so --headed cannot reach them.
+    const conf = parseConf(`
+browserBackend:
+    type: local
+    headed: true
+    display: ":3"
+    channel: chrome
+    args: ["--force-device-scale-factor=1"]
+`);
+
+    assert.equal(conf.browser.headed, true);
+    assert.equal(conf.browser.display, ":3");
+    assert.equal(conf.browser.channel, "chrome");
+    assert.deepEqual(conf.browser.args, ["--force-device-scale-factor=1"]);
+});
+
+test("a browser block with nothing in it is headless, like no block at all", async () => {
+    assert.deepEqual(parseConf("browserBackend:\n    type: local\n").browser, { type: "local", headed: false });
+});
+
+test("headed must be a boolean, not the string true", async () => {
+    // YAML makes this easy to get wrong: quoting it gives a string, and a
+    // truthy string would silently mean the opposite of what "false" reads as.
+    refuses('browserBackend:\n    headed: "false"\n', "browserBackend.headed must be true or false");
+});
+
+test("browser arguments are a list of strings", async () => {
+    refuses("browserBackend:\n    args: --no-sandbox\n", "browserBackend.args must be a list");
+    refuses("browserBackend:\n    args: [1, 2]\n", "browserBackend.args[0] must be a non-empty string");
 });

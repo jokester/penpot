@@ -34,6 +34,15 @@ export interface SupervisorLaneOptions {
      */
     readonly accounts: readonly Account[];
     readonly flavour: string;
+    /**
+     * Show the browser for the lanes the façade opens.
+     *
+     * The only way to watch those: nothing names them on a command line, so
+     * --headed cannot reach them and the setting has to come from the file.
+     */
+    readonly headed?: boolean;
+    /** The X display headed lanes go on. Required when `headed`. */
+    readonly display?: string;
     /** How long to wait for a lane to reach connected before giving up. */
     readonly openTimeoutMs?: number;
 }
@@ -82,8 +91,9 @@ export function supervisorLanes(
                 account,
                 document,
                 mode: "exec",
-                headed: false,
+                headed: options.headed ?? false,
                 flavour: options.flavour,
+                ...(options.headed === true && options.display !== undefined ? { display: options.display } : {}),
             });
             held.set(id, account.name);
 

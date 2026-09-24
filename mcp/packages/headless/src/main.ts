@@ -87,7 +87,7 @@ async function dispatch(options: Options, settings: Settings, env: NodeJS.Proces
     if (options.command === "check") return await check(settings, backend, portRange, io);
     if (options.command === "provision") return await provision(options, settings, backend, env, io);
 
-    const pool = new LeasingPool(playwrightLaunch(launchOptions(env)));
+    const pool = new LeasingPool(playwrightLaunch(launchOptions(settings, env)));
     const map = portMap(portRange, settings.deployment?.upstreamPortRange);
     const deps: LaneDeps = { ...(backend === undefined ? {} : { backend }), pool, portRange, portMap: map };
     const supervisor = new LaneSupervisor(deps);
@@ -168,7 +168,7 @@ async function serve(
     // the password that was never used. Doing it here also means the pool is
     // the workers that actually work, rather than the ones that were listed.
     const accounts: Account[] = [];
-    const store = sessionStore(playwrightSessions(launchOptions(env)));
+    const store = sessionStore(playwrightSessions(launchOptions(settings, env)));
     for (const account of configured) {
         try {
             await ensureSession(account, store, AbortSignal.timeout(90_000));
@@ -211,7 +211,12 @@ async function serve(
     const backend = new SdkBackend();
     const facade = new Facade({
         leases: new LeaseRegistry(
-            supervisorLanes(supervisor, backend, { accounts, flavour: flavourOf(launchOptions(env)) }),
+            supervisorLanes(supervisor, backend, {
+                accounts,
+                flavour: flavourOf(launchOptions(settings, env)),
+                headed: settings.browser.headed,
+                ...(display(settings, env) === undefined ? {} : { display: display(settings, env) as string }),
+            }),
             { capacity: laneCapacity(portRange, accounts.length) }
         ),
         backend,
@@ -418,7 +423,7 @@ async function headless(
         }
     });
 
-    const store = sessionStore(playwrightSessions(launchOptions(env)));
+    const store = sessionStore(playwrightSessions(launchOptions(settings, env)));
 
     try {
         // Once per account, before any browser holds its profile.
@@ -536,24 +541,31 @@ export function specFor(lane: LaneRequest, settings: Settings, env: NodeJS.Proce
         });
     }
 
+    const headed = lane.headed || settings.browser.headed;
     return {
         account,
         document: { fileId: lane.fileId, teamId: lane.teamId },
         mode: lane.mode,
-        headed: lane.headed,
-        flavour: flavourOf(launchOptions(env)),
-        // Falls back to the launcher's own screen, which is what a person
-        // means by --headed with DISPLAY already set.
-        ...(lane.headed ? { display: lane.display ?? env.DISPLAY ?? "" } : {}),
+        headed,
+        flavour: flavourOf(launchOptions(settings, env)),
+        // Falls back to the file, then to the launcher's own screen -- which
+        // is what a person means by --headed with DISPLAY already set.
+        ...(headed ? { display: lane.display ?? display(settings, env) ?? "" } : {}),
         ...(lane.port === undefined ? {} : { port: { http: lane.port, ws: lane.port + 1 } }),
     };
 }
 
-/** Browser options from the environment, matching the old worker's names. */
-function launchOptions(env: NodeJS.ProcessEnv) {
+/** The display headed lanes go on: the file first, then the launcher's own. */
+function display(settings: Settings, env: NodeJS.ProcessEnv): string | undefined {
+    return settings.browser.display ?? (env.DISPLAY === undefined || env.DISPLAY === "" ? undefined : env.DISPLAY);
+}
+
+/** Browser options: the file first, then the environment the old worker used. */
+function launchOptions(settings: Settings, env: NodeJS.ProcessEnv) {
+    const fromEnv = (env.PENPOT_BROWSER_ARGS ?? "").split(/\s+/).filter(Boolean);
     return {
-        channel: env.PENPOT_BROWSER_CHANNEL ?? "",
-        args: (env.PENPOT_BROWSER_ARGS ?? "").split(/\s+/).filter(Boolean),
+        channel: settings.browser.channel ?? env.PENPOT_BROWSER_CHANNEL ?? "",
+        args: settings.browser.args ?? fromEnv,
         clearCache: env.PENPOT_CLEAR_CACHE !== "false",
     };
 }

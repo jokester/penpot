@@ -7,7 +7,7 @@
 // is the only place that does.
 
 import { DEFAULT_COLUMNS, parseColumns, type ColumnName } from "./columns.ts";
-import { CONF_FILE, parseConf, type McpBackendConf, type WorkerUser } from "./conf.ts";
+import { CONF_FILE, parseConf, type BrowserConf, type McpBackendConf, type WorkerUser } from "./conf.ts";
 import { fail } from "./errors.ts";
 import { portMap, type PortRange } from "./ports.ts";
 import { parseWorkspaceUrl, type AccountRef, type DocumentRef } from "./target.ts";
@@ -96,6 +96,8 @@ export interface Settings {
     readonly facade?: { readonly host?: string; readonly port?: number };
     /** The instance an unprovisioned worker belongs to. */
     readonly penpotUrl?: string;
+    /** How browsers are launched. Defaults to a headless local one. */
+    readonly browser: BrowserConf;
 }
 
 /** Where a published port appears when the deployment does not say. */
@@ -143,11 +145,26 @@ export function load(dir: string, env: NodeJS.ProcessEnv, io: ConfigIo): Setting
               ? undefined
               : parseDeployment(json, dir);
 
+    const browser = conf?.browser ?? { type: "local" as const, headed: false };
+
+    // Refused here, where the file is being read, rather than when a browser
+    // fails to start with a message about a missing display server. The same
+    // rule --headed follows on the command line.
+    if (browser.headed && (browser.display ?? env.DISPLAY ?? "") === "") {
+        fail(
+            "not-configured",
+            `${CONF_FILE} asks for a headed browser but no display is set; ` +
+                `add browserBackend.display or set $DISPLAY`,
+            { file: CONF_FILE }
+        );
+    }
+
     return {
         ...(deployment === undefined ? {} : { deployment }),
         accounts,
         tui,
         workers: conf?.workerUsers ?? [],
+        browser,
         ...(conf?.facade === undefined ? {} : { facade: conf.facade }),
         ...(conf?.penpotUrl === undefined ? {} : { penpotUrl: conf.penpotUrl }),
     };

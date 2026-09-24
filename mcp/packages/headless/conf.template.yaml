@@ -87,6 +87,23 @@ mcpBackend:
     #     adminService: penpot-backend
 
 browserBackend:
-    # local: Playwright on this host, the version the lockfile pins.
+    # local: Playwright on this host, the build the lockfile pins.
     # container is documented in SPEC 14.3 and not built.
     type: local
+
+    # Show the browser instead of running it headless.
+    #
+    # This is the ONLY way to watch the lanes the façade opens: --headed is a
+    # lane flag, and the façade names no lanes on a command line. Refused at
+    # startup if no display is set, rather than when a browser fails to launch.
+    headed: false
+
+    # The X display headed lanes go on. Defaults to $DISPLAY.
+    # display: ":0"
+
+    # A Playwright channel -- chrome, msedge -- instead of the pinned build.
+    # Overrides $PENPOT_BROWSER_CHANNEL.
+    # channel: chrome
+
+    # Extra arguments for the browser process. Overrides $PENPOT_BROWSER_ARGS.
+    # args: ["--force-device-scale-factor=1"]

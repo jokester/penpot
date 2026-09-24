@@ -234,3 +234,25 @@ test("a worker that cannot sign in is named with the origin it could not reach",
     assert.match(r.err.text, /worker-a cannot sign in at http:\/\/127\.0\.0\.1:1/);
     assert.match(r.err.text, /trustworthy origin/);
 });
+
+test("a headed browser with no display is refused while the file is being read", async () => {
+    // Rather than when a browser fails to start with a message about a
+    // missing display server, three steps and one browser launch later.
+    const files = { ...FILES, [`${CONFIG}/conf.yaml`]: "browserBackend:\n    headed: true\n" };
+
+    const r = runRaw(["--config", CONFIG, "--check"], { backend: new FakeExecBackend() }, files);
+
+    assert.equal(await r.code, 1);
+    assert.match(r.err.text, /headed browser but no display/);
+});
+
+test("$DISPLAY satisfies it, and the file wins over $DISPLAY", async () => {
+    const files = { ...FILES, [`${CONFIG}/conf.yaml`]: "browserBackend:\n    headed: true\n" };
+    const out = capture();
+    const err = capture();
+    const io: Io = { out: out.stream, err: err.stream, config: configIo(files), backend: new FakeExecBackend() };
+
+    const code = await main(["--config", CONFIG, "--check"], { ...ENV, DISPLAY: ":0" }, io);
+
+    assert.equal(code, 0, err.text);
+});

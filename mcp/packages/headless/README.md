@@ -155,7 +155,17 @@ mcpBackend:
     portRange: 4601-4608
     exposure: none
     kubectl: { namespace: penpot, selector: app=penpot-mcp }
+
+browserBackend:
+    type: local
+    headed: false
 ```
+
+**`browserBackend.headed` is the only way to watch the façade's lanes.**
+`--headed` is a lane flag and the façade names no lanes on a command line, so
+without the file its browsers are unwatchable by construction. It takes
+`display` too, and is refused at startup when neither that nor `$DISPLAY` is
+set — rather than when a browser fails to launch two steps later.
 
 Two rules give it its shape:
 

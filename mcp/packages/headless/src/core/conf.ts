@@ -53,6 +53,26 @@ export interface McpBackendConf {
     };
 }
 
+/** How the launcher drives browsers. Local ones, which is the only kind v1 has. */
+export interface BrowserConf {
+    readonly type: "local" | "container";
+    /**
+     * Show the browser instead of running it headless.
+     *
+     * The default for every lane, including the ones the façade opens for
+     * itself -- which is the only way to watch those, since nothing names them
+     * on a command line. `--headed` on a named lane still turns it on for that
+     * lane alone.
+     */
+    readonly headed: boolean;
+    /** The X display headed lanes use. Falls back to `$DISPLAY`. */
+    readonly display?: string;
+    /** A Playwright channel -- `chrome`, `msedge` -- instead of the pinned build. */
+    readonly channel?: string;
+    /** Extra arguments for the browser process. */
+    readonly args?: readonly string[];
+}
+
 /** The whole file. */
 export interface Conf {
     /** The Penpot instance: what the browser loads and provisioning talks to. */
@@ -60,7 +80,7 @@ export interface Conf {
     readonly workerUsers: readonly WorkerUser[];
     readonly facade?: { readonly host?: string; readonly port?: number };
     readonly mcpBackend?: McpBackendConf;
-    readonly browser: { readonly type: "local" | "container" };
+    readonly browser: BrowserConf;
 }
 
 export const CONF_FILE = "conf.yaml";
@@ -81,7 +101,7 @@ export function parseConf(text: string, file = CONF_FILE): Conf {
     } catch (err) {
         fail("not-configured", `${file} is not valid YAML: ${(err as Error).message.split("\n")[0]}`, { file });
     }
-    if (raw === null || raw === undefined) return { workerUsers: [], browser: { type: "local" } };
+    if (raw === null || raw === undefined) return { workerUsers: [], browser: { type: "local", headed: false } };
 
     const top = object(raw, file, file);
     known(top, TOP_KEYS, file);
@@ -93,7 +113,7 @@ export function parseConf(text: string, file = CONF_FILE): Conf {
     if (facade !== undefined) known(facade, ["host", "port"] as const, file);
 
     const browser = top.browserBackend === undefined ? undefined : object(top.browserBackend, "browserBackend", file);
-    if (browser !== undefined) known(browser, ["type"] as const, file);
+    if (browser !== undefined) known(browser, ["type", "headed", "display", "channel", "args"] as const, file);
     const browserType = browser?.type === undefined ? "local" : str(browser, "type", "browserBackend.type", file);
     if (browserType !== "local" && browserType !== "container") {
         fail("not-configured", `${file}: browserBackend.type must be local or container, not ${browserType}`, {
@@ -121,8 +141,42 @@ export function parseConf(text: string, file = CONF_FILE): Conf {
                   },
               }),
         ...(top.mcpBackend === undefined ? {} : { mcpBackend: backend(top.mcpBackend, file) }),
-        browser: { type: browserType },
+        browser: browserConf(browser, browserType, file),
     };
+}
+
+/** The local browser's knobs, all optional and all with a sane absence. */
+function browserConf(row: Record<string, unknown> | undefined, type: "local" | "container", file: string): BrowserConf {
+    if (row === undefined) return { type, headed: false };
+
+    return {
+        type,
+        headed: bool(row.headed, "browserBackend.headed", file) ?? false,
+        ...optional(row, "display", "browserBackend.display", file),
+        ...optional(row, "channel", "browserBackend.channel", file),
+        ...(row.args === undefined ? {} : { args: strings(row.args, "browserBackend.args", file) }),
+    };
+}
+
+/** A list of strings, which is how arguments are written. */
+function strings(raw: unknown, where: string, file: string): string[] {
+    if (!Array.isArray(raw)) {
+        fail("not-configured", `${file}: ${where} must be a list`, { file, where });
+    }
+    return raw.map((entry, index) => {
+        if (typeof entry !== "string" || entry.trim() === "") {
+            fail("not-configured", `${file}: ${where}[${index}] must be a non-empty string`, { file, where });
+        }
+        return entry.trim();
+    });
+}
+
+function bool(raw: unknown, where: string, file: string): boolean | undefined {
+    if (raw === undefined) return undefined;
+    if (typeof raw !== "boolean") {
+        fail("not-configured", `${file}: ${where} must be true or false`, { file, where });
+    }
+    return raw;
 }
 
 /**

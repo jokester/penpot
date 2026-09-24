@@ -34,6 +34,7 @@ function settings(...accounts: Account[]): Settings {
         accounts: new Map(accounts.map((a) => [a.name, a])),
         tui: { columns: DEFAULT_COLUMNS, statusBar: true },
         workers: [],
+        browser: { type: "local" as const, headed: false },
     };
 }
 

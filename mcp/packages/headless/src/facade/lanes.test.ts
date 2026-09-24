@@ -23,6 +23,8 @@ function account(name: string): Account {
  */
 function fakeSupervisor() {
     const opened: { id: string; account: string }[] = [];
+    /** Every spec the supervisor was handed, for the ones that care how. */
+    const specs: Record<string, unknown>[] = [];
     const closed: string[] = [];
     let listener: ((records: unknown[]) => void) | null = null;
     let next = 1;
@@ -38,6 +40,7 @@ function fakeSupervisor() {
         async open(spec: { account: Account }) {
             const id = `lane-${next++}`;
             opened.push({ id, account: spec.account.name });
+            specs.push(spec as unknown as Record<string, unknown>);
             listener?.(records());
             return id;
         },
@@ -56,7 +59,7 @@ function fakeSupervisor() {
         },
     };
 
-    return { supervisor: supervisor as unknown as LaneSupervisor, opened, closed };
+    return { supervisor: supervisor as unknown as LaneSupervisor, opened, closed, specs };
 }
 
 const backend = {} as Backend;
@@ -177,4 +180,31 @@ test("capacity is whichever of ports and workers runs out first", async () => {
 test("a range with no room for a lane is refused, and so is an empty pool", async () => {
     assert.throws(() => laneCapacity({ lo: 4601, hi: 4601 }), isRefusal);
     assert.throws(() => laneCapacity({ lo: 4601, hi: 4608 }, 0), isRefusal);
+});
+
+test("the façade's own lanes can be headed, which nothing else can reach", async () => {
+    // --headed is a lane flag, and the façade names no lanes on a command
+    // line, so without this its browsers are unwatchable by construction.
+    const s = fakeSupervisor();
+    const lanes = supervisorLanes(s.supervisor, backend, {
+        accounts: [account("only")],
+        flavour: "",
+        headed: true,
+        display: ":3",
+    });
+
+    await lanes.open(DOCUMENT, [], AbortSignal.timeout(5_000));
+
+    assert.equal(s.specs[0]?.headed, true);
+    assert.equal(s.specs[0]?.display, ":3");
+});
+
+test("a headless pool passes no display at all", async () => {
+    const s = fakeSupervisor();
+    const lanes = supervisorLanes(s.supervisor, backend, { accounts: [account("only")], flavour: "" });
+
+    await lanes.open(DOCUMENT, [], AbortSignal.timeout(5_000));
+
+    assert.equal(s.specs[0]?.headed, false);
+    assert.equal("display" in (s.specs[0] ?? {}), false);
 });
