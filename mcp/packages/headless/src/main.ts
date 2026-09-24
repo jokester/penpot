@@ -266,7 +266,9 @@ async function provision(
     if (wanted.length === 0) {
         io.err.write(
             request.email === ""
-                ? `no --email, and no workers left to provision in ${options.configDir}/conf.yaml\n`
+                ? `every worker in ${options.configDir}/conf.yaml already has an account file, ` +
+                      `so there is nothing to create. To re-run one -- to add it to a team, say -- ` +
+                      `name it: --email <address> --invite <link>\n`
                 : "provision-worker-user needs --email\n"
         );
         return 2;

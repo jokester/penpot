@@ -34,6 +34,9 @@ export type Command = "tui" | "no-tui" | "check" | "help" | "version" | "provisi
  */
 export const SUBCOMMANDS = ["server", "provision-worker-user"] as const;
 
+/** Flags that mean the same thing whichever subcommand follows them. */
+const GLOBAL = ["--config"] as const;
+
 /**
  * The scratch document's name when nobody says otherwise.
  *
@@ -134,15 +137,32 @@ already there, and generated only if neither has it.`;
  * inside a branch and skipped its own cleanup.
  */
 export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = {}): Options {
-    const first = argv[0];
+    // Global flags may precede the subcommand, the way `git -C dir status` and
+    // `kubectl -n ns get pods` do. Insisting the subcommand come absolutely
+    // first reads as strictness and is really just a parser that walks argv
+    // once: it makes a wrapper script choose between injecting --config and
+    // taking a subcommand, and ./run has to do both.
+    let at = 0;
+    const leading: string[] = [];
+    while (argv[at] !== undefined && GLOBAL.includes(argv[at] as (typeof GLOBAL)[number])) {
+        const value = argv[at + 1];
+        // A global flag with no value is left for the main loop, which already
+        // knows how to say which flag is missing one.
+        if (value === undefined || value.startsWith("-")) break;
+        leading.push(argv[at] as string, value);
+        at += 2;
+    }
+
+    const first = argv[at];
     if (first !== undefined && !first.startsWith("-")) {
         if (!SUBCOMMANDS.includes(first as (typeof SUBCOMMANDS)[number])) {
             fail("not-configured", `unknown command ${first}; expected ${SUBCOMMANDS.join(" or ")}`, {
                 command: first,
             });
         }
-        if (first === "provision-worker-user") return parseProvision(argv.slice(1), env);
-        argv = argv.slice(1);
+        const rest = [...leading, ...argv.slice(at + 1)];
+        if (first === "provision-worker-user") return parseProvision(rest, env);
+        argv = rest;
     }
 
     let command: Command = "tui";
@@ -370,7 +390,9 @@ function parseProvision(argv: readonly string[], env: NodeJS.ProcessEnv): Option
  */
 function misplaced(arg: string): void {
     if (!SUBCOMMANDS.includes(arg as (typeof SUBCOMMANDS)[number])) return;
-    fail("not-configured", `${arg} must come first, before the flags`, { command: arg });
+    fail("not-configured", `${arg} must come before the other flags; only ${GLOBAL.join(", ")} may precede it`, {
+        command: arg,
+    });
 }
 
 /** Adds a field to the lane being built, or says which flag came too early. */

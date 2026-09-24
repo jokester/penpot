@@ -208,11 +208,34 @@ test("provisioning opens no endpoint and names no lanes", async () => {
     assert.deepEqual(options.lanes, []);
 });
 
-test("a subcommand after the flags is told where it belongs", async () => {
+test("--config may precede the subcommand, as a global flag should", async () => {
+    // What a wrapper script produces: it injects --config and then passes
+    // through whatever the caller typed, which may start with a subcommand.
+    // `./run provision-worker-user` becomes exactly this.
+    const provision = parseArgs(["--config", "/etc/headless", "provision-worker-user", "--email", "w@x.test"], ENV);
+
+    assert.equal(provision.command, "provision");
+    assert.equal(provision.configDir, "/etc/headless");
+    assert.equal(provision.provision?.email, "w@x.test");
+
+    const server = parseArgs(["--config", "/etc/headless", "server", "--no-tui"], ENV);
+    assert.equal(server.command, "no-tui");
+    assert.equal(server.configDir, "/etc/headless");
+});
+
+test("a subcommand after a flag that is not global is told where it belongs", async () => {
     // Reporting it as an unknown argument is true and useless: the word is
     // right, only its position is wrong.
     assert.throws(
-        () => parseArgs(["--config", "/etc/headless", "server"], ENV),
-        (err: unknown) => isLauncherError(err) && /must come first/.test(err.message)
+        () => parseArgs(["--yes", "server"], ENV),
+        (err: unknown) => isLauncherError(err) && /must come before the other flags/.test(err.message)
+    );
+});
+
+test("--config with no value is still reported as a missing value", async () => {
+    // The leading scan must not swallow it and leave a confusing error later.
+    assert.throws(
+        () => parseArgs(["--config"], ENV),
+        (err: unknown) => isLauncherError(err) && /--config needs a value/.test(err.message)
     );
 });
