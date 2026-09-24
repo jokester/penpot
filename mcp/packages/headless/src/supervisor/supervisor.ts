@@ -7,7 +7,7 @@
 // writer where the renderer would be.
 
 import { fail } from "../core/errors.ts";
-import { allocate, assertUsable, type PortPair } from "../core/ports.ts";
+import { allocate, assertUsable, IDENTITY_PORTS, type PortPair } from "../core/ports.ts";
 import { runLane, type LaneDeps, type LaneEvent, type LaneSpec, type LaneState } from "./lane.ts";
 
 /** What the TUI draws for one lane. */
@@ -112,8 +112,15 @@ export class LaneSupervisor implements Supervisor {
         const backend = this.#deps.backend;
         if (spec.mode === "builtin" || backend === undefined) return null;
 
+        // `listening` answers in the container's port space and everything
+        // here is in the host's, so the busy list is translated down before it
+        // is compared to anything. Without this the two spaces never intersect
+        // under a non-identity mapping, and the supervisor allocates as though
+        // the container were empty -- avoiding only its own reservations, and
+        // walking straight into a port some other launcher is already serving.
+        const map = this.#deps.portMap ?? IDENTITY_PORTS;
         const reserved = [...this.#reserved.values()].flatMap((pair) => [pair.http, pair.ws]);
-        const busy = [...new Set([...(await backend.listening()), ...reserved])];
+        const busy = [...new Set([...(await backend.listening()).map((port) => map.local(port)), ...reserved])];
 
         if (spec.port === undefined) return allocate(this.#deps.portRange, busy);
 

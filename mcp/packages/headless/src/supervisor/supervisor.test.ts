@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import type { BrowserKey, BrowserPool, Lease, LeaseInit } from "../browser/pool.ts";
 import { isLauncherError } from "../core/errors.ts";
+import { portMap } from "../core/ports.ts";
 import type { AccountRef, DocumentRef } from "../core/target.ts";
 import { FakeExecBackend } from "../exec/fake.ts";
 import type { LaneDeps, LaneEvent, LaneSpec } from "./lane.ts";
@@ -75,10 +76,15 @@ class ScriptedLanes {
     }
 }
 
-function build(backend?: FakeExecBackend) {
+function build(backend?: FakeExecBackend, over: Partial<LaneDeps> = {}) {
     const pool = new CountingPool();
     const lanes = new ScriptedLanes();
-    const deps: LaneDeps = { pool, portRange: { lo: 4601, hi: 4608 }, ...(backend === undefined ? {} : { backend }) };
+    const deps: LaneDeps = {
+        pool,
+        portRange: { lo: 4601, hi: 4608 },
+        ...(backend === undefined ? {} : { backend }),
+        ...over,
+    };
     const sup = new LaneSupervisor(deps, { run: lanes.run });
     return { pool, lanes, sup };
 }
@@ -335,4 +341,31 @@ test("a builtin lane needs no port at all", async () => {
     await sup.open(spec(1, { mode: "builtin" }));
 
     assert.equal(lanes.started[0]?.port, undefined);
+});
+
+test("a port busy in the container is avoided even when the ranges differ", async () => {
+    // The bug this covers: `listening` answers in the container's port space
+    // and allocation happens in the host's, so under a mapping the two never
+    // intersect and the supervisor allocates as though the container were
+    // empty. It only showed up with a second launcher against one pod --
+    // reservations hide it from a supervisor racing only itself.
+    const backend = new FakeExecBackend({ listening: [4601, 4602] });
+    const h = build(backend, {
+        portRange: { lo: 30601, hi: 30608 },
+        portMap: portMap({ lo: 30601, hi: 30608 }, { lo: 4601, hi: 4608 }),
+    });
+
+    await h.sup.open(spec(1));
+
+    const [record] = h.sup.list();
+    assert.deepEqual(record?.spec.port, { http: 30603, ws: 30604 }, "should skip the pair mapping onto 4601/4602");
+});
+
+test("with no mapping the two spaces are the same, as they always were", async () => {
+    const backend = new FakeExecBackend({ listening: [4601, 4602] });
+    const h = build(backend);
+
+    await h.sup.open(spec(1));
+
+    assert.deepEqual(h.sup.list()[0]?.spec.port, { http: 4603, ws: 4604 });
 });
