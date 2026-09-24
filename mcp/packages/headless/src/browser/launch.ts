@@ -72,6 +72,21 @@ export function playwrightLaunch(options: LaunchOptions = {}): Launch {
 
         const context = await chromium.launchPersistentContext(profileDir, {
             headless: !key.headed,
+            // Playwright installs its own handlers for these and KILLS the
+            // browser when one arrives. The launcher already handles them, and
+            // handles them better: it ends the lanes, closes the tabs and then
+            // closes the context, which is what lets Chromium flush its
+            // profile. With Playwright's defaults the two race and Chromium
+            // loses -- measured, the profile is left with
+            // `exit_type: "Crashed"`, which is also what makes the next launch
+            // offer to restore pages.
+            //
+            // Nothing is orphaned by this: the browser is a child of the
+            // Playwright driver, which is a child of this process, so an exit
+            // by any route still takes it down.
+            handleSIGINT: false,
+            handleSIGTERM: false,
+            handleSIGHUP: false,
             ...(options.channel === undefined || options.channel === "" ? {} : { channel: options.channel }),
             args: [...NO_THROTTLE_ARGS, ...(options.args ?? [])],
             viewport: { width: 1440, height: 900 },
