@@ -10,7 +10,7 @@
 // wanted and cost a second port range, a tab-verification step and an "is this
 // browser ours" problem that has no good answer.
 
-import type { PortRange } from "../core/ports.ts";
+import { IDENTITY_PORTS, type PortMap, type PortRange } from "../core/ports.ts";
 import type { AccountRef } from "../core/target.ts";
 import type { ExecBackend } from "../exec/backend.ts";
 
@@ -32,7 +32,10 @@ export interface HostProcesses {
 /** What a scan needs to know about. */
 export interface ScanDeps {
     readonly backend?: ExecBackend;
+    /** The ports this host reaches. A leftover outside it is somebody else's. */
     readonly portRange: PortRange;
+    /** How a container port maps to one of those. Identity unless configured. */
+    readonly portMap?: PortMap;
     readonly accounts: Iterable<AccountRef>;
     readonly host: HostProcesses;
 }
@@ -63,7 +66,9 @@ export async function scan(deps: ScanDeps): Promise<Leftover[]> {
 
     if (deps.backend !== undefined) {
         const result = await deps.backend.run(["sh", "-c", SERVER_SCAN], AbortSignal.timeout(15_000)).catch(() => null);
-        if (result !== null && result.code === 0) found.push(...parseServers(result.stdout, deps.portRange));
+        if (result !== null && result.code === 0) {
+            found.push(...parseServers(result.stdout, deps.portRange, deps.portMap));
+        }
     }
 
     const processes = await deps.host.list().catch(() => []);
@@ -79,7 +84,7 @@ export async function scan(deps: ScanDeps): Promise<Leftover[]> {
  * default server, which is pid 1, sets no port variable and must never be
  * offered for reaping -- killing it would take the container down.
  */
-export function parseServers(stdout: string, range: PortRange): Leftover[] {
+export function parseServers(stdout: string, range: PortRange, map: PortMap = IDENTITY_PORTS): Leftover[] {
     const out: Leftover[] = [];
 
     for (const line of stdout.split("\n")) {
@@ -87,9 +92,16 @@ export function parseServers(stdout: string, range: PortRange): Leftover[] {
         const pid = Number(rawPid);
         const port = Number(rawPort);
         if (!Number.isInteger(pid) || !Number.isInteger(port)) continue;
-        if (port < range.lo || port > range.hi) continue;
 
-        out.push({ kind: "server", pid, port, detail: rest.join(" ").trim() || "node" });
+        // The scan reports what the container binds; the range is what this
+        // host reaches. Compared without translating, they never intersect
+        // under a mapping and every leftover is dismissed as out of range --
+        // which made --check, whose whole job is finding leftovers, silently
+        // report none while a lane server was still listening.
+        const local = map.local(port);
+        if (local < range.lo || local > range.hi) continue;
+
+        out.push({ kind: "server", pid, port: local, detail: rest.join(" ").trim() || "node" });
     }
     return out;
 }

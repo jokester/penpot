@@ -24,7 +24,7 @@ import { Facade } from "./facade/facade.ts";
 import { laneCapacity, supervisorLanes } from "./facade/lanes.ts";
 import { LeaseRegistry } from "./facade/leases.ts";
 import { serveFacade, type Serving } from "./facade/server.ts";
-import { portMap } from "./core/ports.ts";
+import { portMap, type PortMap } from "./core/ports.ts";
 import { catalogue } from "./penpot/catalogue.ts";
 import { penpotApi } from "./penpot/rpc.ts";
 import { workerAdmin } from "./provision/admin.ts";
@@ -84,17 +84,19 @@ async function dispatch(options: Options, settings: Settings, env: NodeJS.Proces
     const backend = await resolveBackend(settings, env, io);
     const portRange = settings.deployment?.portRange ?? { lo: 4601, hi: 4608 };
 
-    if (options.command === "check") return await check(settings, backend, portRange, io);
+    const map = portMap(portRange, settings.deployment?.upstreamPortRange);
+
+    if (options.command === "check") return await check(settings, backend, portRange, map, io);
     if (options.command === "provision") return await provision(options, settings, backend, env, io);
 
     const pool = new LeasingPool(playwrightLaunch(launchOptions(settings, env)));
-    const map = portMap(portRange, settings.deployment?.upstreamPortRange);
     const deps: LaneDeps = { ...(backend === undefined ? {} : { backend }), pool, portRange, portMap: map };
     const supervisor = new LaneSupervisor(deps);
 
     const leftovers = await scan({
         ...(backend === undefined ? {} : { backend }),
         portRange,
+        portMap: map,
         accounts: settings.accounts.values(),
         host: hostProcesses,
     });
@@ -368,11 +370,13 @@ async function check(
     settings: Settings,
     backend: ExecBackend | undefined,
     portRange: { lo: number; hi: number },
+    map: PortMap,
     io: Io
 ): Promise<number> {
     const leftovers = await scan({
         ...(backend === undefined ? {} : { backend }),
         portRange,
+        portMap: map,
         accounts: settings.accounts.values(),
         host: hostProcesses,
     });

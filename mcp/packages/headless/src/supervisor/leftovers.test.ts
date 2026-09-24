@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { allocate } from "../core/ports.ts";
+import { allocate, portMap } from "../core/ports.ts";
 import type { AccountRef } from "../core/target.ts";
 import { FakeExecBackend } from "../exec/fake.ts";
 import { describe, parseBrowsers, parseServers, reap, scan, type HostProcesses, type Leftover } from "./leftovers.ts";
@@ -149,4 +149,24 @@ test("a leftover renders as one line", () => {
 
     assert.equal(describe(server), ":4601  server  pid 348  node index.js");
     assert.equal(describe(browser), "browser  pid 91204  profile-mcp-worker");
+});
+
+test("a leftover is found through a port mapping, and reported as this host sees it", async () => {
+    // --check exists to find leftovers, and compared without translating, the
+    // container's ports and the host's range never intersect -- so it reported
+    // none while a lane server was still listening. Measured against the real
+    // pod: pid 1512 on in-pod 4601, invisible until this.
+    const map = portMap({ lo: 30601, hi: 30608 }, { lo: 4601, hi: 4608 });
+
+    const found = parseServers("1512 4601 node index.js\n", { lo: 30601, hi: 30608 }, map);
+
+    assert.deepEqual(found, [{ kind: "server", pid: 1512, port: 30601, detail: "node index.js" }]);
+});
+
+test("a container port with no local equivalent is still ignored", async () => {
+    // The image's own server on 4401 maps to 30401, outside the range, and
+    // must never be offered for reaping.
+    const map = portMap({ lo: 30601, hi: 30608 }, { lo: 4601, hi: 4608 });
+
+    assert.deepEqual(parseServers("1 4401 node index.js --multi-user\n", { lo: 30601, hi: 30608 }, map), []);
 });
