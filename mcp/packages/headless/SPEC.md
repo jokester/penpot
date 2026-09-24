@@ -222,6 +222,15 @@ reaches is `portRange`, and `upstreamPortRange` maps them onto what the
 container binds -- a nodePort range sits 26000 above the container's on that
 cluster, and a constant offset is all that takes.
 
+**A NodePort makes every node the right node.** A `hostPort` is reachable only
+on the node that binds it, which pins the pod there and pins the launcher with
+it; a NodePort answers on every node, `127.0.0.1` included, so the pod
+schedules anywhere and a launcher on any node reaches a lane with no tunnel.
+That is the difference between "the launcher runs beside the pod" and "the
+launcher runs wherever you are", and it costs the loopback-only restriction a
+`hostPort` can have with `hostIP` — a NodePort cannot, because
+`--nodeport-addresses` is a kube-proxy-wide setting.
+
 A third shape is worth noting because it is the tidiest: **the launcher as a
 sidecar in the MCP pod.** The WebSocket is then `localhost` inside the pod,
 which satisfies invariant 7 by construction rather than by careful arrangement,
@@ -577,7 +586,11 @@ Each cost real time to learn; each becomes an assertion with a test.
 6. **An exec client dying does not stop what it started**, with either backend.
    Record the in-container pid; kill it explicitly.
 7. The worker talks to **`localhost`, never a LAN address** — hardened session
-   cookies are `Secure` and only loopback is trustworthy.
+   cookies are `Secure` and only loopback is trustworthy. There is a second,
+   independent reason on a real deployment: the public origin is the one people
+   use, so it is the one an identity-aware proxy sits in front of, and a
+   headless browser has no identity to present to it. So the worker path is a
+   separate node-local address permanently, not until TLS arrives.
 8. **One Chromium per profile directory, never two.** Two instances on one
    profile fight over the lock. Sharing a browser between lanes (§5) satisfies
    this by construction, which is why the old "one profile per document" rule is
