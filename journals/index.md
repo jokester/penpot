@@ -4,6 +4,7 @@ One line per session journal, grouped by theme. Newest first within a group.
 
 ## Self-hosting and the MCP worker
 
+- [20260925-p2688368-kubectl-exec-backend-conf-yaml-worker-pool-nodeport-services-export-public-uri.md](20260925-p2688368-kubectl-exec-backend-conf-yaml-worker-pool-nodeport-services-export-public-uri.md) — kubectl exec lanes, conf.yaml, worker pool, NodePorts, export public-uri bug
 - [20260923-p2097666-mcp-facade-one-endpoint-document-leases-foreground-server-arch-diagram-provision-cli.md](20260923-p2097666-mcp-facade-one-endpoint-document-leases-foreground-server-arch-diagram-provision-cli.md) — MCP façade with document leases, foreground server, Penpot architecture diagram, provisioning CLI
 - [20260921-p1299581-mcp-headless-build-live-acceptance-cred-port-tui-rework.md](20260921-p1299581-mcp-headless-build-live-acceptance-cred-port-tui-rework.md) — mcp-headless built and driven live, credentials ported, TUI columns and catalogue
 - [20260920-p1083625-selfhost-deploy-headless-mcp-worker-authelia-sso-tui-launcher.md](20260920-p1083625-selfhost-deploy-headless-mcp-worker-authelia-sso-tui-launcher.md) — self-hosted Penpot, Authelia SSO, headless MCP workers, per-document TUI launcher
