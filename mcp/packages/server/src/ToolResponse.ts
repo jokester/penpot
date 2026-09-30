@@ -10,11 +10,21 @@ export class TextContent implements TextItem {
     constructor(public text: string) {}
 
     /**
-     * @param data - Text data as string or as object (from JSON representation where indices are mapped to character codes)
+     * @param data - Text data as string, as a base64 envelope (see {@link ImageContent.byteData}), or as
+     *   object (from JSON representation where indices are mapped to character codes)
      */
     public static textData(data: string | object): string {
         if (typeof data === "object") {
-            // convert object containing character codes (as obtained from JSON conversion of string) back to string
+            // recognize the base64 envelope produced by the plugin's ExecuteCodeTaskHandler for any
+            // Uint8Array result -- SVG export included, since `shape.export()` always returns bytes.
+            // Missing this case fed `{__type, data}` into the numeric-object branch below, where
+            // `Object.values` yields two strings, both `ToUint16` to 0, and every SVG export came
+            // back as two silent NUL bytes (penpot/penpot-mcp, four and a half months, #9431 fallout).
+            const envelope = data as { __type?: unknown; data?: unknown };
+            if (envelope.__type === "base64" && typeof envelope.data === "string") {
+                return Buffer.from(envelope.data, "base64").toString("utf-8");
+            }
+            // legacy fallback: object (as obtained from JSON conversion of string) back to string
             return String.fromCharCode(...(Object.values(data) as number[]));
         } else {
             return data;

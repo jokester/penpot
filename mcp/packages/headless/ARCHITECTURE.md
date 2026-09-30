@@ -293,14 +293,25 @@ that look like an auth bug.
 - **A workspace URL needs `team-id` as well as `file-id`.** With only the file
   id the page loads, authenticates, opens the notifications socket, reports no
   error and renders nothing.
-- **`export_shape` is unreliable outside a human browser.** Without
-  `enable-wasm-export` it round-trips through the exporter and returns an asset
-  URL on the *public* hostname, which a worker on localhost cannot fetch. With
-  the flag it renders in-browser to a `blob:` URI — but only for png/jpeg/webp,
-  only on files carrying the `render-wasm/v1` feature, and on this host
-  `_render_shape_pixels` fails under software GL in both headless and headed
-  browsers. The working alternative is
-  `penpot.generateMarkup([shape], {type:"svg"})` through `execute_code`.
+- **`export_shape` needed two fixes, in `mcp/packages/server`, not here.**
+  SVG (and any other text result carrying plugin-returned bytes) came back as
+  two silent NUL bytes: the plugin base64-envelopes every `Uint8Array` result
+  to dodge JSON's ~10x blowup (`penpot/penpot#9420`), `ImageContent.byteData`
+  knew the envelope but `TextContent.textData` didn't, so `Object.values`
+  hit two strings and `fromCharCode` `ToUint16`'d both to 0 (`#9431` fallout,
+  four and a half months unnoticed, no test covered it). Fixed in
+  `ToolResponse.ts`. PNG still renders in-browser via `shape.export()`, gated
+  on `enable-wasm-export` — SVG never was — but `_render_shape_pixels` fails
+  under software GL in both headless and headed browsers, cause unresolved
+  (`--enable-unsafe-swiftshader`, a `render` group grant, and a fresh VNC
+  session each changed nothing). `ExportShapeTool` now catches that one
+  failure for a "shape" PNG and falls back to requesting SVG — unaffected,
+  since it never touches the rasteriser — and rasterising it server-side with
+  `sharp`. Fidelity is not identical to the native renderer, but it is an
+  export where there was none. `penpot.generateMarkup([shape], {type:"svg"})`
+  through `execute_code` remains a manual escape hatch, but is a different,
+  fragment-oriented artifact (the code-inspect panel's output) rather than
+  the exporter's standalone document, and was never the fix for either bug.
 - **MCP is enabled per account, not globally.** A workspace loads the plugin only
   when the profile prop `mcpEnabled` is set *and* an unexpired `mcp`-type token
   exists. An account with neither never joins a session — which is the cleanest

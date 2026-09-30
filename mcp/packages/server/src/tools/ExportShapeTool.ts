@@ -83,6 +83,8 @@ export class ExportShapeTool extends Tool<ExportShapeArgs> {
         );
     }
 
+    private readonly exportLogger = createLogger("ExportShapeTool");
+
     /**
      * Creates a new ExecuteCode tool instance.
      *
@@ -147,12 +149,37 @@ export class ExportShapeTool extends Tool<ExportShapeArgs> {
             shapeCode = `penpotUtils.findShapeById("${args.shapeId}")`;
         }
         const asSvg = args.format === "svg";
-        const code = `return penpotUtils.exportImage(${shapeCode}, "${args.mode}", ${asSvg});`;
-
-        // execute the code and obtain the image data
-        const task = new ExecuteCodePluginTask({ code: code });
-        const result = await this.mcpServer.pluginBridge.executePluginTask(task);
-        const imageData = result.data!.result;
+        let imageData: Uint8Array | object;
+        try {
+            imageData = await this.requestShapeBytes(shapeCode, args.mode, asSvg);
+        } catch (err) {
+            // The one path that renders through the WASM rasteriser -- a
+            // "shape" PNG -- can fail there for reasons that are the render
+            // pipeline's, not the shape's (observed: `_render_shape_pixels`
+            // throwing under software GL; root cause unresolved as of the
+            // 2026-09-25 journal). SVG export does not touch that rasteriser
+            // at all, so re-requesting the shape as SVG and rasterising it
+            // here sidesteps the broken path entirely. Fidelity is not
+            // identical to the native renderer, but a slightly different PNG
+            // beats a hard failure on every export.
+            if (args.mode !== "shape" || asSvg) throw err;
+            this.exportLogger.warn(
+                "PNG export of shape %s failed in the plugin (%s); falling back to SVG rasterised with sharp",
+                args.shapeId,
+                err instanceof Error ? err.message : String(err)
+            );
+            try {
+                const svgData = await this.requestShapeBytes(shapeCode, args.mode, true);
+                const svgBytes = ImageContent.byteData(svgData);
+                imageData = await sharp(Buffer.from(svgBytes)).png().toBuffer();
+            } catch (fallbackErr) {
+                throw new Error(
+                    `PNG export failed (${err instanceof Error ? err.message : String(err)}), ` +
+                        `and the SVG fallback failed too`,
+                    { cause: fallbackErr }
+                );
+            }
+        }
 
         // handle output and return response
         if (!args.filePath) {
@@ -175,6 +202,24 @@ export class ExportShapeTool extends Tool<ExportShapeArgs> {
             }
             return new TextResponse(`The shape has been exported to ${args.filePath}`);
         }
+    }
+
+    /**
+     * Asks the plugin to export a shape and returns its raw (possibly enveloped) bytes.
+     *
+     * @param shapeCode - expression resolving to the `Shape` to export, in plugin scope
+     * @param mode - "shape" for the shape itself, "fill" for its image fill
+     * @param asSvg - whether to request SVG (true) or PNG (false); "fill" is PNG only
+     */
+    private async requestShapeBytes(
+        shapeCode: string,
+        mode: "shape" | "fill",
+        asSvg: boolean
+    ): Promise<Uint8Array | object> {
+        const code = `return penpotUtils.exportImage(${shapeCode}, "${mode}", ${asSvg});`;
+        const task = new ExecuteCodePluginTask({ code: code });
+        const result = await this.mcpServer.pluginBridge.executePluginTask(task);
+        return result.data!.result;
     }
 
     /**
