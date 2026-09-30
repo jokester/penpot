@@ -31,6 +31,9 @@ function fakeLanes(over: Partial<LaneSource> = {}) {
         async wipe(lane) {
             wiped.push(lane.id);
         },
+        // Real lanes can die by a path this registry never took; the fake
+        // default is that nothing does, so a test opts in explicitly.
+        isAlive: () => true,
         ...over,
     };
     return { lanes, opened, closed, wiped };
@@ -110,6 +113,67 @@ test("switching away frees the document for someone else", async () => {
 
     assert.equal(taken.document.fileId, "file-a");
     assert.deepEqual(f.opened, ["file-a", "file-b"], "the warm lane is reused, not reopened");
+});
+
+// --- a dead lane heals itself -----------------------------------------------
+
+test("a session is not refused by a slot whose lane already died", async () => {
+    // A lane can end by a path this registry never took -- a crash, or a
+    // human stopping it from the TUI, which drives the supervisor directly.
+    const dead = new Set<string>();
+    const f = fakeLanes({ isAlive: (id) => !dead.has(id) });
+    const registry = new LeaseRegistry(f.lanes, { capacity: 8 });
+
+    const first = await registry.acquire("s1", doc("diagrams"), SIGNAL);
+    dead.add(first.lane.id);
+
+    const second = await registry.acquire("s2", doc("diagrams"), SIGNAL);
+
+    assert.notEqual(second.lane.id, first.lane.id, "a fresh lane replaces the dead one");
+    assert.deepEqual(f.opened, ["file-diagrams", "file-diagrams"]);
+    assert.deepEqual(f.closed, [], "nothing real is left to close");
+});
+
+test("a warm slot whose lane already died is not handed on", async () => {
+    const dead = new Set<string>();
+    const f = fakeLanes({ isAlive: (id) => !dead.has(id) });
+    const registry = new LeaseRegistry(f.lanes, { capacity: 8 });
+
+    const first = await registry.acquire("s1", doc("a"), SIGNAL);
+    await registry.release("s1");
+    dead.add(first.lane.id);
+
+    const second = await registry.acquire("s2", doc("a"), SIGNAL);
+
+    assert.notEqual(second.lane.id, first.lane.id);
+    assert.deepEqual(f.opened, ["file-a", "file-a"]);
+});
+
+test("a dead slot does not count against capacity", async () => {
+    const dead = new Set<string>();
+    const f = fakeLanes({ isAlive: (id) => !dead.has(id) });
+    const registry = new LeaseRegistry(f.lanes, { capacity: 1 });
+
+    const first = await registry.acquire("s1", doc("a"), SIGNAL);
+    dead.add(first.lane.id);
+
+    // Capacity is full on paper, but "a"'s lane is gone -- there is room.
+    const second = await registry.acquire("s2", doc("b"), SIGNAL);
+    assert.equal(second.document.fileId, "file-b");
+});
+
+test("a call against a slot whose lane died is told to connect again, not left to hang", async () => {
+    const dead = new Set<string>();
+    const f = fakeLanes({ isAlive: (id) => !dead.has(id) });
+    const registry = new LeaseRegistry(f.lanes, { capacity: 8 });
+    const lease = await registry.acquire("s1", doc("a"), SIGNAL);
+    dead.add(lease.lane.id);
+
+    await refuses(() => registry.run(lease, async () => "x"), "connect to it again");
+
+    // The next attempt gets a fresh lane rather than the same refusal.
+    const again = await registry.acquire("s1", doc("a"), SIGNAL);
+    assert.notEqual(again.lane.id, lease.lane.id);
 });
 
 // --- the scratchpad ------------------------------------------------------

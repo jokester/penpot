@@ -29,12 +29,17 @@ function fakeSupervisor() {
     let listener: ((records: unknown[]) => void) | null = null;
     let next = 1;
 
+    /** Ids `close` removed or a test declared failed -- what `alive` must refuse. */
+    const gone = new Set<string>();
+
     const records = () =>
-        opened.map((lane) => ({
-            spec: { id: lane.id },
-            state: "connected",
-            clientUrl: "http://127.0.0.1:4601/mcp",
-        }));
+        opened
+            .filter((lane) => !closed.includes(lane.id))
+            .map((lane) => ({
+                spec: { id: lane.id },
+                state: gone.has(lane.id) ? "failed" : "connected",
+                clientUrl: "http://127.0.0.1:4601/mcp",
+            }));
 
     const supervisor = {
         async open(spec: { account: Account }) {
@@ -57,9 +62,10 @@ function fakeSupervisor() {
         async close(id: string) {
             closed.push(id);
         },
+        list: records,
     };
 
-    return { supervisor: supervisor as unknown as LaneSupervisor, opened, closed, specs };
+    return { supervisor: supervisor as unknown as LaneSupervisor, opened, closed, specs, fail: (id: string) => gone.add(id) };
 }
 
 const backend = {} as Backend;
@@ -165,6 +171,46 @@ test("a lane that never connects gives its worker back", async () => {
     await assert.rejects(
         () => quietLanes.open(DOCUMENT, [], AbortSignal.timeout(5_000)),
         (err: unknown) => !/every worker/.test(String(err))
+    );
+});
+
+// --- a lane the supervisor no longer runs ----------------------------------
+
+test("isAlive says no once the supervisor no longer lists the lane", async () => {
+    const s = fakeSupervisor();
+    const lanes = supervisorLanes(s.supervisor, backend, { accounts: [account("only")], flavour: "" });
+
+    const opened = await lanes.open(DOCUMENT, [], AbortSignal.timeout(5_000));
+    assert.equal(lanes.isAlive(opened.id), true);
+
+    await lanes.close(opened.id);
+    assert.equal(lanes.isAlive(opened.id), false, "closed and gone");
+});
+
+test("isAlive says no for a lane that failed without going through close", async () => {
+    const s = fakeSupervisor();
+    const lanes = supervisorLanes(s.supervisor, backend, { accounts: [account("only")], flavour: "" });
+
+    const opened = await lanes.open(DOCUMENT, [], AbortSignal.timeout(5_000));
+    s.fail(opened.id);
+
+    assert.equal(lanes.isAlive(opened.id), false);
+});
+
+test("a worker whose lane failed outside close is free again", async () => {
+    // Otherwise a crash, or a human stopping the lane from the TUI, costs a
+    // worker permanently -- the same leak `isAlive` closes for the registry.
+    const s = fakeSupervisor();
+    const lanes = supervisorLanes(s.supervisor, backend, { accounts: [account("only")], flavour: "" });
+
+    const first = await lanes.open(DOCUMENT, [], AbortSignal.timeout(5_000));
+    s.fail(first.id);
+
+    await lanes.open({ fileId: "file-2", teamId: "team-1" }, [], AbortSignal.timeout(5_000));
+
+    assert.deepEqual(
+        s.opened.map((lane) => lane.account),
+        ["only", "only"]
     );
 });
 

@@ -301,9 +301,23 @@ What would force non-stock code, so the boundary is known:
   façade allocates them". The rule was right, for a better reason than it was
   given: two agents on one document is hazardous in itself (§6c). It stays, and
   the façade enforces the same thing at `connect_doc`.
-- **Idle timeout.** A tab is 94 MB and a server 46 MB, and an idle lease now also
-  keeps another agent off the document. Penpot sweeps its own sessions at 60
-  minutes, which is far too generous for that. Proposed: **10 minutes**.
+- ~~**Idle timeout.**~~ Settled at **10 minutes**, and actually scheduled: the
+  sweep existed as `LeaseRegistry.collectIdle` but nothing called it until a
+  live deployment turned up a document refused forever with no lane in sight
+  to explain it. A tab is 94 MB and a server 46 MB, and an idle lease now also
+  keeps another agent off the document, which is why this is short — Penpot
+  sweeps its own sessions at 60 minutes, far too generous here.
+- **A held lease outlives its lane.** The same investigation found the deeper
+  bug: a lane can end by a path that is not `disconnect_doc`, not the
+  transport's `onclose`, and not the idle sweep above — a crash, or a human
+  stopping it from the TUI, which drives `LaneSupervisor` directly and has no
+  reason to know a façade lease exists. The registry's slot did not notice,
+  so the document stayed "held" by a session whose lane was already gone,
+  refused to everyone, forever. Fixed by asking, not remembering: every place
+  a slot is trusted now checks `LaneSource.isAlive(id)` against the
+  supervisor's own record first, and forgets the slot if the lane is not
+  there. The registry keeps no state of its own about a lane's liveness — the
+  supervisor is the one source of truth, and the registry defers to it.
 - ~~**Port range.**~~ Settled at `4601-4616`, eight lanes. Twenty was the first
   proposal and the measurement killed it: Docker runs one `docker-proxy` per
   published port at about 6.9 MB, so forty ports would cost roughly 276 MB of

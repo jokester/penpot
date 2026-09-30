@@ -73,6 +73,7 @@ function fakeLanes() {
         },
         async close() {},
         async wipe() {},
+        isAlive: () => true,
     };
     return { lanes, opened };
 }

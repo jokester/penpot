@@ -211,16 +211,17 @@ async function serve(
 
     const portRange = settings.deployment?.portRange ?? { lo: 4601, hi: 4608 };
     const backend = new SdkBackend();
+    const leases = new LeaseRegistry(
+        supervisorLanes(supervisor, backend, {
+            accounts,
+            flavour: flavourOf(launchOptions(settings, env)),
+            headed: settings.browser.headed,
+            ...(display(settings, env) === undefined ? {} : { display: display(settings, env) as string }),
+        }),
+        { capacity: laneCapacity(portRange, accounts.length) }
+    );
     const facade = new Facade({
-        leases: new LeaseRegistry(
-            supervisorLanes(supervisor, backend, {
-                accounts,
-                flavour: flavourOf(launchOptions(settings, env)),
-                headed: settings.browser.headed,
-                ...(display(settings, env) === undefined ? {} : { display: display(settings, env) as string }),
-            }),
-            { capacity: laneCapacity(portRange, accounts.length) }
-        ),
+        leases,
         backend,
         catalogue: catalogue(penpotApi()),
         accounts,
@@ -235,9 +236,14 @@ async function serve(
         log: (line) => io.out.write(`${line}\n`),
     });
 
+    // FACADE.md promises a warm lane is reclaimed once nobody has come back
+    // for it; nothing else ever calls the sweep that keeps that promise.
+    const sweep = setInterval(() => void leases.collectIdle(), 60_000);
+
     return {
         address: serving.address,
         close: async () => {
+            clearInterval(sweep);
             await serving.close();
             await backend.closeAll();
         },

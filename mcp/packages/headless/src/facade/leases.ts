@@ -50,6 +50,16 @@ export interface LaneSource {
      * on release is what makes a lane safe to hand on.
      */
     wipe(lane: LaneHandle, signal: AbortSignal): Promise<void>;
+    /**
+     * Whether a lane this registry opened is still running.
+     *
+     * A lane can end by a path this registry never took -- a crash, or a
+     * human stopping it from the TUI, which drives the supervisor directly.
+     * Without this, a slot for a dead lane would refuse every later comer for
+     * a document nothing is actually running, forever: the registry has no
+     * other way to learn its own record went stale.
+     */
+    isAlive(id: string): boolean;
 }
 
 export interface LeaseOptions {
@@ -136,7 +146,7 @@ export class LeaseRegistry {
         signal: AbortSignal,
         eligible: readonly string[]
     ): Promise<Lease> {
-        const existing = this.#slots.get(document.fileId);
+        const existing = this.#forgetIfDead(document.fileId);
 
         if (existing?.holder === sessionId) return { document: existing.document, lane: existing.lane };
 
@@ -179,6 +189,10 @@ export class LeaseRegistry {
      * evict another agent -- so when every lane is held the answer is no.
      */
     async #makeRoom(wanted: DocumentRef): Promise<void> {
+        // A slot whose lane already died, held or warm, holds nothing real --
+        // pruning it first frees room a live client is not actually using.
+        for (const fileId of this.#slots.keys()) this.#forgetIfDead(fileId);
+
         if (this.#slots.size < this.#capacity) return;
 
         const warm = [...this.#slots.values()]
@@ -236,7 +250,7 @@ export class LeaseRegistry {
      * start.
      */
     async run<T>(lease: Lease, fn: () => Promise<T>): Promise<Ran<T>> {
-        const slot = this.#slots.get(lease.document.fileId);
+        const slot = this.#forgetIfDead(lease.document.fileId);
         if (slot === undefined || slot.lane.id !== lease.lane.id) {
             fail("lane-refused", `the lane for "${describe(lease.document)}" is gone; connect to it again`, {
                 fileId: lease.document.fileId,
@@ -304,5 +318,21 @@ export class LeaseRegistry {
     async #tearDown(slot: Slot): Promise<void> {
         this.#slots.delete(slot.document.fileId);
         await this.#lanes.close(slot.lane.id).catch(() => undefined);
+    }
+
+    /**
+     * The slot for a document, unless its lane is dead -- in which case it is
+     * dropped and treated as though it never existed.
+     *
+     * `close()` is not called: whatever killed the lane already did that far
+     * better than a call to a handle that is not there could.
+     */
+    #forgetIfDead(fileId: string): Slot | undefined {
+        const slot = this.#slots.get(fileId);
+        if (slot !== undefined && !this.#lanes.isAlive(slot.lane.id)) {
+            this.#slots.delete(fileId);
+            return undefined;
+        }
+        return slot;
     }
 }

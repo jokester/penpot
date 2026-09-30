@@ -57,8 +57,23 @@ export function supervisorLanes(
     /** Which worker each open lane holds, so it is free again when it closes. */
     const held = new Map<string, string>();
 
+    /**
+     * Whether the supervisor still runs a lane, by id.
+     *
+     * A lane can end by a path that never calls `close` below -- a crash, or a
+     * human stopping it from the TUI, which drives the supervisor directly.
+     * `held` and the lease registry both trust this over their own bookkeeping.
+     */
+    function alive(id: string): boolean {
+        return supervisor.list().some((record) => record.spec.id === id && record.state !== "failed");
+    }
+
     /** The first worker nobody is using, preferring the eligible ones. */
     function take(eligible: readonly string[]): Account {
+        // A worker whose lane died outside `close` would otherwise stay
+        // "busy" forever, one short of what was configured.
+        for (const id of held.keys()) if (!alive(id)) held.delete(id);
+
         const busy = new Set(held.values());
         const allowed =
             eligible.length === 0
@@ -116,6 +131,8 @@ export function supervisorLanes(
         async wipe(lane: LaneHandle, signal: AbortSignal): Promise<void> {
             await backend.call(lane.clientUrl, "execute_code", { code: WIPE_CODE }, signal);
         },
+
+        isAlive: alive,
     };
 }
 
