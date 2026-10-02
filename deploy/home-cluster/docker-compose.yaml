@@ -177,6 +177,10 @@ services:
       # then reach it from inside the container, which is the only place it is
       # routable: `docker compose exec penpot-mcp curl 127.0.0.1:4403/`.
       PENPOT_MCP_REPL_PORT: "4401"
+      # Share tabs and holds across MCP server instances (issue #11759). One
+      # instance runs here, but this is the mode cloud runs in, so it is the
+      # one to exercise. Same Valkey the backend and exporter use.
+      PENPOT_MCP_REDIS_URI: redis://penpot-valkey/0
     # A port range for per-document servers started with `docker compose exec`
     # inside this container. exec'd servers inherit the image's
     # PENPOT_MCP_SERVER_HOST=0.0.0.0, so they are reachable on these.
